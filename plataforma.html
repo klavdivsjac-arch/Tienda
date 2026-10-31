@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
-<title>Catalogo_de_ventas_v33_2026-10-23_2052</title>
+<title>Catalogo_de_ventas_v35_2026-10-30_1529</title>
 <link rel="manifest" id="pwa-manifest">
 <meta name="theme-color" content="#F2A027">
 <meta name="description" content="Mirá los productos y pedí por WhatsApp.">
@@ -236,6 +236,7 @@ table.admin-table th{background:var(--paper-2); font-size:11.5px; text-transform
 .order-status-revisado{background:var(--teal-tint); color:var(--teal-dark);}
 .order-status-completado{background:#DFF3E6; color:#1B7A3E;}
 .order-status-cancelado{background:var(--coral-tint); color:#8A2A1C;}
+.order-status-confirmado{background:#E3ECFB; color:#1F4E9E;}
 .item-unavailable{background:var(--coral-tint); border:1px solid #E8B8AC; border-radius:10px; padding:10px; margin-top:6px; font-size:13px; color:#8A2A1C;}
 .wa-float{position:fixed; bottom:calc(82px + env(safe-area-inset-bottom)); left:16px; width:58px; height:58px; border-radius:50%; background:var(--whatsapp); color:#fff; display:flex; align-items:center; justify-content:center; font-size:28px; box-shadow:var(--shadow-lift); z-index:60;}
 .preview-exit{position:fixed; top:14px; right:14px; z-index:70; background:var(--ink); color:#fff; border:none; border-radius:999px; padding:9px 14px; font-size:12.5px; font-weight:700; box-shadow:var(--shadow-lift); cursor:pointer; display:flex; align-items:center; gap:6px;}
@@ -315,6 +316,11 @@ const SUPABASE_URL = 'https://ocwrpyumrquxiquvgnbl.supabase.co';
 const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9jd3JweXVtcnF1eGlxdXZnbmJsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTI0NDYzNjYsImV4cCI6MjEwODAyMjM2Nn0.jKAOi4Pi253PEV9UhMXs3X6w9iOAwrKfPmpxomJZU3k';
 let sb = null, db = null, auth = null;
 try{
+  window.AUTH_RET = (function(){ const r = {code:/[?&]code=/.test(location.search), err:'', verifier:null, standalone:false, ua:navigator.userAgent||''};
+    try{ r.err = new URLSearchParams(location.search).get('error_description') || new URLSearchParams(location.hash.replace(/^#/,'')).get('error_description') || ''; }catch(e){}
+    try{ r.verifier = Object.keys(localStorage).some(k=>/code-verifier$/.test(k)); }catch(e){ r.verifier = null; }
+    try{ r.standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone===true; }catch(e){}
+    return r; })();
   sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY, {auth:{flowType:'pkce', detectSessionInUrl:true, persistSession:true, autoRefreshToken:true}});
   db = sb; auth = sb.auth;
 }catch(e){ console.error('Error iniciando Supabase:', e); }
@@ -480,10 +486,14 @@ function beep(){
 }
 async function fetchOrdersAdmin(){
   if(!sb || !STORE || !adminSession) return;
-  const {data: rows, error} = await sb.from('store_docs').select('key,data').eq('store_id', STORE.id).like('key', 'order\\_%');
+  const first = !ORDERS_SINCE;
+  let qy = sb.from('store_docs').select('key,data,updated_at').eq('store_id', STORE.id).like('key', 'order\\_%');
+  qy = first ? qy.order('updated_at', {ascending:false}).limit(ORDERS_LIMIT) : qy.gte('updated_at', ORDERS_SINCE).order('updated_at', {ascending:true}).limit(1000);
+  const {data: rows, error} = await qy;
   if(error){ console.error(error); return; }
-  const data = {};
-  (rows||[]).forEach(r=>{ if(r.key.startsWith('order_') && r.data && r.data.id) data[r.data.id] = r.data; });
+  if(first) ORDERS_MORE = (rows||[]).length >= ORDERS_LIMIT;
+  const data = first ? {} : {...ORDERS};
+  (rows||[]).forEach(r=>{ if(r.key.startsWith('order_') && r.data && r.data.id){ data[r.data.id] = r.data; if(String(r.updated_at) > ORDERS_SINCE) ORDERS_SINCE = String(r.updated_at); } });
   const before = JSON.stringify(ORDERS);
   const known = new Set(Object.keys(ORDERS));
   const fresh = Object.values(data).filter(o=>!known.has(o.id));
@@ -504,13 +514,13 @@ function startOrdersListener(){
   ordersFirst = true;
   let chan = null, timer = null;
   try{
-    chan = sb.channel('docs-' + STORE.id).on('postgres_changes', {event:'*', schema:'public', table:'store_docs', filter:'store_id=eq.'+STORE.id}, ()=>{ fetchOrdersAdmin(); }).subscribe();
+    chan = sb.channel('docs-' + STORE.id).on('postgres_changes', {event:'*', schema:'public', table:'store_docs', filter:'store_id=eq.'+STORE.id}, ()=>{ clearTimeout(window.__ordT); window.__ordT = setTimeout(fetchOrdersAdmin, 1500); }).subscribe();
   }catch(e){ console.error(e); }
   timer = setInterval(fetchOrdersAdmin, 20000);
   fetchOrdersAdmin();
   ordersUnsub = ()=>{ clearInterval(timer); try{ if(chan) sb.removeChannel(chan); }catch(e){} };
 }
-function stopOrdersListener(){ if(ordersUnsub){ try{ ordersUnsub(); }catch(e){} ordersUnsub = null; } }
+function stopOrdersListener(){ ORDERS_SINCE = ''; ORDERS_MORE = false; if(ordersUnsub){ try{ ordersUnsub(); }catch(e){} ordersUnsub = null; } }
 // Cliente: sigue SOLO su pedido (por su link secreto) y ve cambiar el estado sin recargar.
 let orderWatch = {}, ORDER_MISSING = {};
 function watchOrder(id){
@@ -535,14 +545,7 @@ function productsForSave(obj){
 }
 async function loadAll(){
   CONFIG = await dbLoad('config');
-  PRODUCTS = (await dbLoad('products')) || {};
-  // Las fotos de cada producto viven en un registro aparte (pimg_<id>); las imágenes en sí están en Storage.
-  try{
-    await Promise.all(Object.values(PRODUCTS).filter(p=>p && p.imgDoc).map(async p=>{
-      const imgs = await dbLoad('pimg_'+p.id);
-      p.images = (Array.isArray(imgs) && imgs.length) ? imgs : [PLACEHOLDER_IMG];
-    }));
-  }catch(e){ console.error(e); }
+  await loadProducts();
   try{ if(CONFIG && CONFIG.welcome && CONFIG.welcome.hasImage){ WELCOME_IMG = (await dbLoad('banner_welcome')) || ''; } }catch(e){ console.error(e); }
   try{
     const bi = await dbLoad('banners');
@@ -714,13 +717,14 @@ function saveCart(cart){
 }
 function lineKey(productId, variantName){ return productId + '::' + (variantName||''); }
 function addToCart(productId, qty, variantName){
-  qty = Math.max(1, Number(qty)||1);
+  qty = Math.max(wsMin(PRODUCTS[productId]||{}), Number(qty)||1);
   variantName = variantName || '';
   const cart = getCart();
   const key = lineKey(productId, variantName);
   const existing = cart.find(i=>lineKey(i.productId, i.variantName)===key);
-  if(existing) existing.qty += qty;
-  else cart.push({productId, qty, variantName});
+  { const mx = wsMaxQty(PRODUCTS[productId]||{}); const cur = existing ? existing.qty : 0;
+    if(cur+qty > mx){ qty = Math.max(0, mx-cur); toast('Solo hay '+mx+' en stock.'); if(qty<=0) return; }
+    if(existing) existing.qty += qty; else cart.push({productId, qty, variantName}); }
   saveCart(cart);
   toast('Agregado al carrito.');
   render();
@@ -730,7 +734,7 @@ function updateCartQty(productId, variantName, qty){
   const key = lineKey(productId, variantName);
   let cart = getCart();
   if(qty<=0){ cart = cart.filter(i=>lineKey(i.productId, i.variantName)!==key); }
-  else{ const it = cart.find(i=>lineKey(i.productId, i.variantName)===key); if(it) it.qty = qty; }
+  else{ const it = cart.find(i=>lineKey(i.productId, i.variantName)===key); if(it){ const mx = Math.max(1, wsMaxQty(PRODUCTS[productId]||{})); it.qty = Math.min(qty, mx); if(qty>mx) toast('Solo hay '+mx+' en stock.'); } }
   saveCart(cart);
   render();
 }
@@ -746,10 +750,11 @@ function cartLineItems(){
     if(!p) return null;
     const baseVn = String(i.variantName||'').split(' · ')[0];
     const variant = (p.variants||[]).find(v=>v.name===baseVn);
-    const price = p.price + (variant ? Number(variant.priceDelta)||0 : 0);
+    const price = priceFor(p, i.variantName, i.qty, wsMyList());
     return {
       productId:i.productId, name:p.name, variantName:i.variantName||'', price, qty:i.qty,
-      image:(p.images&&p.images[0])||PLACEHOLDER_IMG, status:p.status
+      image:p.thumb||(p.images&&p.images[0])||PLACEHOLDER_IMG, status:p.status,
+      unit:p.unit||'', minQty:wsMin(p), maxQty:wsMaxQty(p)
     };
   }).filter(Boolean);
 }
@@ -861,6 +866,7 @@ function renderHeader(){
     ${it(on('carrito'), "navigate('#/carrito')", '🛒' + (n ? `<b class="cart-badge nb">${n}</b>` : ''), t('Carrito'))}
     ${acct ? it(on('registro'), "navigate('#/registro')", getCustomer() ? '👤' : '👤', getCustomer() ? 'Mi cuenta' : 'Ingresar') : ''}
     ${isAdminUiVisible() ? it(on('admin'), "navigate('#/admin')", '🛠️', 'Administrar') : ''}
+    ${sellerSession ? it(on('vendedor'), "navigate('#/vendedor')", '🧑‍💼', 'Vendedor') : ''}
     ${it('', "setLang(LANG==='es'?'gn':'es')", '🌐', LANG==='es' ? 'ES' : 'GN')}
   </div></nav>`;
 }
@@ -986,7 +992,7 @@ function openLightbox(i){
 }
 
 function productCard(p){
-  const img = (p.images && p.images[0]) || PLACEHOLDER_IMG;
+  const img = p.thumb || (p.images && p.images[0]) || PLACEHOLDER_IMG;
   const discount = p.oldPrice ? Math.round(100-(p.price/p.oldPrice*100)) : 0;
   const hasVariants = p.variants && p.variants.length>0;
   const minPrice = hasVariants ? Math.min(p.price, ...p.variants.map(v=>p.price+(Number(v.priceDelta)||0))) : p.price;
@@ -999,6 +1005,7 @@ function productCard(p){
     </div>
     <div class="info">
       <div class="name">${escapeHtml(p.name)}</div>
+      ${wsCardExtra(p)}
       <div class="price-row">
         ${!hasPrice(p) ? `<span class="price" style="font-size:13px;">Consultar</span>` : hasVariants ? `<span class="price">Desde ${money(minPrice)}</span>` : `
           <span class="price">${money(p.price)}</span>
@@ -1253,14 +1260,15 @@ function syncAuth(u){
   return syncCache.p;
 }
 async function loadRole(u){
-  ROLE = {platform:false, member:false};
+  ROLE = {platform:false, member:false, seller:false};
   if(!u || !sb) return;
   try{
     const a = await sb.from('platform_admins').select('user_id').eq('user_id', u.uid).maybeSingle();
     ROLE.platform = !!(a && a.data);
     if(STORE){
-      const m = await sb.from('store_members').select('user_id').eq('store_id', STORE.id).eq('user_id', u.uid).maybeSingle();
-      ROLE.member = !!(m && m.data);
+      const m = await sb.from('store_members').select('user_id,role').eq('store_id', STORE.id).eq('user_id', u.uid).maybeSingle();
+      ROLE.seller = !!(m && m.data && m.data.role==='seller');
+      ROLE.member = !!(m && m.data) && !ROLE.seller;
     }
   }catch(e){ console.error(e); }
 }
@@ -1268,7 +1276,9 @@ async function doSyncAuth(u){
   AUTH_USER = u || null;
   await loadRole(u);
   adminSession = !!STORE && isAdminUser(u);
+  sellerSession = false;
   if(adminSession){ await loadAdminData(); return; }
+  if(STORE && u && ROLE.seller && !ROLE.platform){ sellerSession = true; stopOrdersListener(); VIEWS = {}; CLICKS = []; LEGACY_ORDERS = {}; setCustomer(null); await loadSellerData(); return; }
   stopOrdersListener(); VIEWS = {}; CLICKS = []; ORDERS = {}; LEGACY_ORDERS = {};
   if(u && STORE){
     const c = await dbGetCustomer(u.uid);
@@ -1276,6 +1286,8 @@ async function doSyncAuth(u){
   } else { setCustomer(null); }
 }
 async function loadAdminData(){
+  await migrateProducts();
+  await wsLoadMeta();
   VIEWS = (await dbLoad('views')) || {};
   const ck = (await dbLoad('clicks')) || {};
   CLICKS = Array.isArray(ck) ? ck.slice() : Object.values(ck);
@@ -1285,6 +1297,7 @@ async function loadAdminData(){
 // Google abre su pantalla y vuelve a esta página: guardamos qué se quería hacer para seguir al volver.
 async function googleLogin(kind){
   if(!sb){ toast('El acceso con Google no está disponible en este momento.'); return null; }
+  if(/FBAN|FBAV|Instagram|Messenger|TikTok|Snapchat|Line\/|MicroMessenger|; wv\)/i.test(navigator.userAgent||'')){ try{ copyText(location.href); }catch(e){} toast('Estás dentro de otra app y Google no lo permite. Ya copié el link: pegalo en Chrome o Safari.'); return null; }
   try{ sessionStorage.setItem('mt_pending', JSON.stringify({kind: kind||'customer', slug: getSlug(), hash: location.hash, back: window.__afterReg || null})); }catch(e){}
   try{
     const {error} = await sb.auth.signInWithOAuth({provider:'google', options:{redirectTo: location.origin + location.pathname, queryParams:{prompt:'select_account'}}});
@@ -1351,6 +1364,7 @@ function viewRegistro(){
     <div class="form-card" style="max-width:520px; margin:0 auto;">
       <h2 style="margin-top:0;">${c.id ? '👤 Mis datos' : '👤 Completá tus datos'}</h2>
       <p class="hint">Conectado con Google: <strong>${escapeHtml(AUTH_USER.email||'')}</strong>. ${c.id ? 'Podés corregir tus datos cuando quieras.' : 'Lo hacés una sola vez y tus próximos pedidos se completan solos.'}</p>
+      ${wsAccountBox()}
       <form id="reg-form">
         <div class="form-row"><label>Nombre y apellido</label><input class="field" name="name" value="${escapeHtml(nm)}" autocomplete="name"></div>
         <div class="form-row"><label>Número de teléfono (WhatsApp)</label><input class="field" name="phone" type="tel" placeholder="595 9xx xxx xxx" value="${escapeHtml(c.phone||'')}" autocomplete="tel"></div>
@@ -1399,7 +1413,7 @@ async function submitRegistro(btn){
     const uid = AUTH_USER.uid;
     const c = { id: uid, uid, email: AUTH_USER.email || '', name, phone: digits, birth, address,
       lat: window.__regLoc ? window.__regLoc.lat : null, lng: window.__regLoc ? window.__regLoc.lng : null,
-      createdAt: prev.createdAt || Date.now(), updatedAt: Date.now() };
+      createdAt: prev.createdAt || Date.now(), updatedAt: Date.now(), wl: prev.wl || null };
     const ok = await withTimeout(dbSaveCustomer(c), 10000);
     if(ok === false) return;
     if(ok === '__timeout__'){ toast('Está tardando demasiado. Revisá tu conexión e intentá de nuevo.'); return; }
@@ -1412,6 +1426,7 @@ async function forgetCustomer(){ await logout(); }
 
 /* --- administración de clientes --- */
 async function loadCustomersAdmin(){
+  await wsLoadMeta();
   const byKey = {};
   const legacy = (await dbLoad('customers')) || {};
   Object.values(legacy).forEach(c=>{ byKey['p:'+c.phone] = {...c, legacy:true}; });
@@ -1441,6 +1456,7 @@ function cliListHtml(){
       </div>
       <div class="hint" style="margin:4px 0;">📱 ${escapeHtml(c.phone)} · 🎂 ${c.birth ? new Date(c.birth+'T00:00:00').toLocaleDateString('es-PY') : '-'}${age!=null?' ('+age+' años)':''}</div>
       ${c.address ? `<div class="hint" style="margin:2px 0;">📍 ${escapeHtml(c.address)}</div>` : ''}
+      ${wsCliControls(c)}
       <div style="display:flex; gap:8px; flex-wrap:wrap; margin-top:8px;">
         <a class="btn btn-whatsapp btn-sm" href="${waLink(c.phone, 'Hola '+c.name+'! Te escribimos de '+CONFIG.businessName+'.')}" target="_blank">💬 WhatsApp</a>
         ${map ? `<a class="btn btn-outline btn-sm" href="${map}" target="_blank" rel="noopener">📍 Ver ubicación</a>` : ''}
@@ -1475,6 +1491,7 @@ function viewAdminClientes(){
     <div style="display:flex; gap:8px; margin-bottom:12px;">
       <input class="field" id="cli-q" placeholder="Buscar por nombre, correo o teléfono" style="flex:1; min-width:0;" oninput="document.getElementById('cli-list').innerHTML=cliListHtml()">
       <button type="button" class="btn btn-outline btn-sm" onclick="exportCustomersCSV()">⬇️ CSV</button>
+      ${wsOn() ? '<button type="button" class="btn btn-mango btn-sm" onclick="wsNewCustomer()">+ Nuevo</button>' : ''}
     </div>
     <div id="cli-list">${emptyState('👥','Cargando...')}</div>
     <button class="btn btn-outline btn-block" style="margin-top:14px;" onclick="navigate('#/admin')">← Volver al panel</button>
@@ -1545,6 +1562,8 @@ function viewCatalogo(query){
   if(q) items = items.filter(p=> p.name.toLowerCase().includes(q) || (p.description||'').toLowerCase().includes(q) || catInfo(p.category).name.toLowerCase().includes(q));
   if(cat!=='todos') items = items.filter(p=>p.category===cat);
   items.sort((a,b)=>b.createdAt-a.createdAt);
+  { const ck = q+'|'+cat; if(window.__catKey!==ck){ window.__catKey = ck; window.__catN = CAT_STEP; } window.__catItems = items; }
+  const shownItems = items.slice(0, window.__catN||CAT_STEP);
 
   const msg = `Hola, quiero consultar sobre ${escapeHtml(CONFIG.businessName)} en su catálogo online.`;
   const logoHtml = CONFIG.logo && isImgSrc(CONFIG.logo) ? `<img src="${CONFIG.logo}">` : (CONFIG.logo||'🏪');
@@ -1576,7 +1595,7 @@ function viewCatalogo(query){
     </div>
     ${BANNERS.items.length ? `<div class="section" style="padding-bottom:0;">${bannerHtml(BANNERS.items, BANNERS.effect)}</div>` : ''}
     <div class="section">
-      ${items.length ? `<div class="grid-products">${items.map(productCard).join('')}</div>` : emptyState('📦', adminSession ? 'Todavía no publicaste productos. Tocá "Administrar" para cargar el primero.' : 'Este catálogo todavía no tiene productos.')}
+      ${items.length ? `<div class="grid-products" id="cat-grid">${shownItems.map(productCard).join('')}</div>${catMoreBtn(items.length, shownItems.length)}` : emptyState('📦', adminSession ? 'Todavía no publicaste productos. Tocá "Administrar" para cargar el primero.' : 'Este catálogo todavía no tiene productos.')}
     </div>
   </div>
   ${renderFooter()}
@@ -1698,13 +1717,13 @@ function viewProducto(id){
   const idx = window.__pdIdx || 0;
   const discount = p.oldPrice ? Math.round(100-(p.price/p.oldPrice*100)) : 0;
   const disabled = p.status==='agotado';
-  window.__pdQty = window.__pdQty || 1;
+  window.__pdQty = Math.max(window.__pdQty || 1, wsMin(p));
   const hasVariants = p.variants && p.variants.length>0;
   if(hasVariants && !window.__pdVariant) window.__pdVariant = p.variants[0].name;
   const selectedVariant = hasVariants ? p.variants.find(v=>v.name===window.__pdVariant) || p.variants[0] : null;
   const needFlavors = !!(selectedVariant && Number(selectedVariant.maxFlavors)>0);
   if(needFlavors) syncPots(window.__pdQty);
-  const finalPrice = p.price + (selectedVariant ? Number(selectedVariant.priceDelta)||0 : 0);
+  const finalPrice = priceFor(p, selectedVariant ? selectedVariant.name : '', window.__pdQty, wsMyList());
   const msg = isService(p) ? `Hola, me interesa el servicio "${p.name}" que vi en el catálogo de ${CONFIG.businessName}. ¿Me pasás más información?` : `Hola, vi ${p.name}${selectedVariant?(' ('+selectedVariant.name+')'):''} en el catálogo de ${CONFIG.businessName} y quiero consultar.`;
   return `
   <div class="pd-flexpage">
@@ -1719,6 +1738,7 @@ function viewProducto(id){
           ${isService(p) ? `<span class="tag" style="font-size:10.5px; padding:3px 7px; margin:0 4px 4px 0;">📣 Servicio</span>` : `<span class="tag" style="font-size:10.5px; padding:3px 7px; margin:0 4px 4px 0;">${p.status==='agotado'?'❌ '+t('Sin stock'):(p.status==='pausado'?'⏸️ No visible':'✅ '+t('Disponible'))}</span>`}
           ${isLowStock(p) ? `<span class="tag" style="font-size:10.5px; padding:3px 7px; margin:0 4px 4px 0; background:var(--coral-tint); color:#8A2A1C;">🔥 ¡Últimas ${p.stock}!</span>` : ''}
         </div>
+        ${wsTierBox(p)}
         ${p.description ? `<div class="pd-desc-clamp">${escapeHtml(p.description)}</div>` : ''}
         ${hasVariants ? `
         <div class="pill-select" style="margin:6px 0;">
@@ -1730,9 +1750,9 @@ function viewProducto(id){
         <div style="display:flex; align-items:center; gap:10px; margin:6px 0;">
           <span style="font-weight:700; font-size:12px;">${t('Cantidad:')}</span>
           <div class="qty-stepper">
-            <button type="button" onclick="window.__pdQty=Math.max(1,window.__pdQty-1); render();">−</button>
+            <button type="button" onclick="window.__pdQty=Math.max(${wsMin(p)},window.__pdQty-1); render();">−</button>
             <span>${window.__pdQty}</span>
-            <button type="button" onclick="window.__pdQty=window.__pdQty+1; render();">+</button>
+            <button type="button" onclick="window.__pdQty=Math.min(${wsMaxQty(p)},window.__pdQty+1); render();">+</button>
           </div>
         </div>
         <button class="btn btn-mango btn-block" style="padding:9px; font-size:13px;" onclick="addProductToCart('${p.id}')">🛒 ${(needFlavors && potsDone()<window.__pdPots.length) ? (window.__pdPots.length>1 ? 'Elegí los sabores de cada pote' : 'Elegí tus sabores') : t('Agregar al carrito')}</button>
@@ -1893,7 +1913,7 @@ async function saveSaludo(btn){
     toast('Guardado.');
   } finally { if(btn) btn.disabled = false; }
 }
-function loginRequired(){ return !!(CONFIG && CONFIG.loginMode==='required' && feat('login_required')); }
+function loginRequired(){ return !!(CONFIG && CONFIG.loginMode==='required' && feat('login_required')) || (wsOn() && !!W().approval); }
 function isRegistered(){ const c = getCustomer(); return !!(c && c.id); }
 function viewCarrito(){
   const needLogin = loginRequired() && !isRegistered();
@@ -1910,7 +1930,7 @@ function viewCarrito(){
           <img src="${it.image}" alt="">
           <div class="ci-info">
             <div class="ci-name">${escapeHtml(it.name)}${it.variantName?` <span class="tag">${escapeHtml(it.variantName)}</span>`:''}${it.status==='agotado'?' <span class="tag" style="background:var(--coral-tint); color:#8A2A1C;">Sin stock</span>':''}</div>
-            <div class="ci-price">${money(it.price)} c/u</div>
+            <div class="ci-price">${money(it.price)} c/u${it.unit?' · '+escapeHtml(it.unit):''}</div>${wsLineWarn(it)}
             <div class="qty-stepper" style="margin-top:6px;">
               <button type="button" onclick="updateCartQty('${it.productId}', '${escapeHtml(it.variantName).replace(/'/g,"\\'")}', ${it.qty-1})">−</button>
               <span>${it.qty}</span>
@@ -1940,6 +1960,7 @@ function viewCarrito(){
           </div>
           ${window.__cartCouponError ? `<p class="hint" style="color:var(--coral);">${escapeHtml(window.__cartCouponError)}</p>` : ''}
         </div>
+        ${wsCartBox(tot)}
         <div style="border-top:1px dashed var(--line); margin:14px 0; padding-top:10px;">
           <div style="display:flex; justify-content:space-between; font-size:13.5px; color:var(--ink-soft); margin-bottom:4px;"><span>${t('Subtotal')}</span><span>${money(tot.subtotal)}</span></div>
           ${tot.zone?`<div style="display:flex; justify-content:space-between; font-size:13.5px; color:var(--ink-soft); margin-bottom:4px;"><span>Envío (${escapeHtml(tot.zone.name)})</span><span>${money(tot.zonePrice)}</span></div>`:''}
@@ -1962,7 +1983,7 @@ function viewCarrito(){
           <div class="form-row"><label>¿Cuándo lo querés? (opcional)</label><input class="field" name="deliveryTime" type="datetime-local"></div>
           <div class="form-row"><label>Notas (opcional)</label><textarea class="field" name="notes" placeholder="Ej: dirección, referencias, etc."></textarea></div>
         </form>
-        ${adminSession ? `<p class="hint" style="text-align:center; border:1.5px dashed var(--line); border-radius:12px; padding:10px;">🛠️ Estás como administrador: no podés hacer pedidos en tu propia tienda. Para probar, cerrá sesión o entrá desde otro celular.</p>` : `<button type="button" class="btn btn-mango btn-block" onclick="submitCheckout(this)">✅ Confirmar pedido</button>`}
+        ${(adminSession||sellerSession) ? `<p class="hint" style="text-align:center; border:1.5px dashed var(--line); border-radius:12px; padding:10px;">🛠️ Estás como administrador: no podés hacer pedidos en tu propia tienda. Para probar, cerrá sesión o entrá desde otro celular.</p>` : `<button type="button" class="btn btn-mango btn-block" onclick="submitCheckout(this)">✅ Confirmar pedido</button>`}
         </div>
       </div>
     ` : emptyState('🛒','Tu carrito está vacío. Agregá productos desde el catálogo.')}
@@ -1980,10 +2001,11 @@ function applyCoupon(){
   render();
 }
 async function submitCheckout(btn){
-  if(adminSession){ toast('Sos el administrador de esta tienda: no podés comprarte a vos mismo. Para probar, cerrá sesión o pedí desde otro celular.'); return; }
+  if(adminSession||sellerSession){ toast('Sos el administrador de esta tienda: no podés comprarte a vos mismo. Para probar, cerrá sesión o pedí desde otro celular.'); return; }
   if(loginRequired() && !isRegistered()){ toast('Para pedir tenés que entrar con Google.'); return; }
   const items = cartLineItems();
   if(!items.length){ toast('Tu carrito está vacío.'); return; }
+  { const wmsg = wsCheckout(items); if(wmsg){ toast(wmsg); return; } }
   const f = new FormData(document.getElementById('checkout-form'));
   const customerName = (f.get('customerName')||'').trim();
   const customerPhone = normPhone((f.get('customerPhone')||'').trim());
@@ -2007,6 +2029,7 @@ async function submitCheckout(btn){
     status: 'nuevo',
     createdAt: Date.now(), updatedAt: Date.now()
   };
+  Object.assign(order, wsOrderExtras());
   const updatedOrders = {...ORDERS, [id]: order};
   const result = await withTimeout(dbMergeOrder(order), 10000);
   if(result === '__timeout__' || result === false){
@@ -2073,7 +2096,7 @@ function viewAdminGate(){
   <div class="container section">
     <div class="form-card" style="text-align:center;">
       <h2 style="margin-top:0;">Acceso de administrador</h2>
-      <p class="hint" style="margin-bottom:14px;">Entrá con la cuenta de Google del administrador.</p>
+      <p class="hint" style="margin-bottom:14px;">Entrá con la cuenta de Google del administrador o del vendedor.</p>
       <button type="button" class="btn btn-primary btn-block" onclick="adminGoogle(this)">${GOOGLE_G} Entrar con Google</button>
     </div>
   </div>
@@ -2107,12 +2130,15 @@ function viewAdmin(){
     ${topProduct ? `<p class="hint" style="margin-top:8px;">⭐ Producto más vendido: <strong>${escapeHtml(topProduct[0])}</strong> (${topProduct[1]} vendidos)</p>` : ''}
     <div class="act-grid">
       <button class="act-tile main" onclick="navigate('#/admin/publicar')"><span class="ic">➕</span>Publicar producto</button>
+      <button class="act-tile" onclick="navigate('#/admin/importar')"><span class="ic">📥</span>Importar / exportar productos</button>
       <button class="act-tile" onclick="navigate('#/admin/tienda')"><span class="ic">✏️</span>Editar mi tienda</button>
       <button class="act-tile" onclick="navigate('#/admin/configuracion')"><span class="ic">⚙️</span>Envíos y cupones</button>
       <button class="act-tile" onclick="navigate('#/admin/banners')"><span class="ic">📢</span>Banner de publicidad${feat('banner')?'':' 🔒'}</button>
       <button class="act-tile" onclick="navigate('#/admin/saludo')"><span class="ic">👋</span>Bienvenida y registro</button>
       <button class="act-tile" onclick="navigate('#/admin/sabores')"><span class="ic">🍨</span>Sabores${feat('flavors')?'':' 🔒'}</button>
       <button class="act-tile" onclick="navigate('#/admin/clientes')"><span class="ic">👥</span>Clientes</button>
+      <button class="act-tile" onclick="navigate('#/admin/mayorista')"><span class="ic">🏭</span>Modo mayorista${feat('wholesale')?(wsOn()?'':' (apagado)'):' 🔒'}</button>
+      ${wsOn() ? `<button class="act-tile" onclick="navigate('#/admin/vendedores')"><span class="ic">🧑‍💼</span>Vendedores${feat('sellers')?'':' 🔒'}</button><button class="act-tile" onclick="navigate('#/admin/cuentas')"><span class="ic">💳</span>Cuenta corriente${feat('credit')?'':' 🔒'}</button>` : ''}
       <button class="act-tile" onclick="navigate('#/admin/bienvenida')"><span class="ic">🔗</span>Mis links y QR</button>
       <button class="act-tile" onclick="previewMode=true; navigate('#/');"><span class="ic">👁️</span>Ver como cliente</button>
       <button class="act-tile" onclick="navigate('#/admin/plan')"><span class="ic">💎</span>Mi plan</button>
@@ -2121,18 +2147,10 @@ function viewAdmin(){
     </div>
     <div class="section" id="mis-productos">
       <div class="section-head"><h2>Mis productos</h2></div>
+      ${items.length>8 ? `<input class="field" id="adm-q" placeholder="Buscar producto..." style="margin-bottom:8px;" oninput="window.__admN=40; admProdRefresh()">` : ''}
       ${items.length ? `<div class="table-wrap"><table class="admin-table">
         <thead><tr><th>Producto</th><th>Precio</th><th>Estado</th><th class="hide-sm">Vistas</th><th></th></tr></thead>
-        <tbody>${items.map(p=>`
-          <tr>
-            <td>${escapeHtml(p.name)}</td><td>${money(p.price)}</td>
-            <td><span class="status-pill status-${p.status}">${p.status}</span></td>
-            <td class="hide-sm">${VIEWS[p.id]||0}</td>
-            <td><div class="admin-actions">
-              <button class="btn btn-outline btn-sm" onclick="navigate('#/admin/producto/${p.id}/editar')">Editar</button>
-              <button class="btn btn-danger btn-sm" onclick="deleteProduct('${p.id}')">Eliminar</button>
-            </div></td>
-          </tr>`).join('')}</tbody>
+        <tbody id="adm-prod-body">${admProdRowsHtml()}</tbody>
       </table></div>` : emptyState('📦','Todavía no publicaste productos.')}
     </div>
   </div>
@@ -2140,10 +2158,7 @@ function viewAdmin(){
 }
 async function deleteProduct(id){
   if(!confirm('¿Eliminar este producto?')) return;
-  const hadImgDoc = PRODUCTS[id] && PRODUCTS[id].imgDoc;
-  delete PRODUCTS[id];
-  await dbSave('products', productsForSave(PRODUCTS));
-  if(hadImgDoc){ try{ await dbDelete('pimg_'+id); }catch(e){} }
+  if(await prodDelete(id)===false) return;
   toast('Producto eliminado.'); render();
 }
 
@@ -2283,11 +2298,12 @@ function viewAdminPedidos(){
   ${renderHeader()}
   <div class="container section">
     <div class="section-head"><h2>🧾 Pedidos</h2>${(orders.length && feat('export_orders'))?`<button class="btn btn-outline btn-sm" onclick="exportOrdersCSV()">⬇️ Exportar CSV</button>`:''}</div>
+    ${ORDERS_MORE ? `<div class="form-card" style="margin-bottom:12px;"><span class="hint">Mostrando los últimos ${ORDERS_LIMIT} pedidos.</span> <button type="button" class="btn btn-outline btn-sm" onclick="loadAllOrders(this)">Cargar todos</button></div>` : ''}
     ${Object.keys(LEGACY_ORDERS||{}).length ? `<div class="form-card" style="margin-bottom:12px;"><strong>📦 Tenés ${Object.keys(LEGACY_ORDERS).length} pedido(s) del sistema anterior.</strong><p class="hint" style="margin:4px 0 8px;">Importalos una sola vez para verlos acá junto con los nuevos.</p><button type="button" class="btn btn-mango btn-sm" onclick="importLegacyOrders(this)">Importar pedidos anteriores</button></div>` : ''}
     ${orders.length ? orders.map(o=>`
       <div class="order-card" onclick="navigate('#/admin/pedido/${o.id}')">
         <div style="display:flex; justify-content:space-between; align-items:center;">
-          <strong>${escapeHtml(o.customerName)}</strong>
+          <strong>${escapeHtml(o.customerName)}${o.sellerName?' <span class="tag">🧑‍💼 '+escapeHtml(o.sellerName)+'</span>':''}${o.payMethod==='credito'?' <span class="tag">💳 a cuenta</span>':''}</strong>
           <span class="order-status order-status-${o.status}">${o.status}</span>
         </div>
         <div class="hint" style="margin-top:4px;">${new Date(o.createdAt).toLocaleString('es-PY')} · ${o.items.length} producto${o.items.length===1?'':'s'} · ${money(o.total)}</div>
@@ -2310,12 +2326,12 @@ async function importLegacyOrders(btn){
 }
 function exportOrdersCSV(){
   const orders = Object.values(ORDERS).sort((a,b)=>b.createdAt-a.createdAt);
-  const rows = [['Fecha','Cliente','WhatsApp','Productos','Subtotal','Envio','Cupon','Descuento','Total','Estado','N° pedido']];
+  const rows = [['Fecha','Cliente','WhatsApp','Productos','Subtotal','Envio','Cupon','Descuento','Total','Estado','N° pedido','Vendedor','Pago']];
   orders.forEach(o=>{
     const itemsStr = o.items.map(it=>`${it.qty}x ${it.name}${it.variantName?(' ('+it.variantName+')'):''}`).join(' | ');
     rows.push([
       new Date(o.createdAt).toLocaleString('es-PY'), o.customerName, o.customerPhone, itemsStr,
-      o.subtotal??o.total, o.zonePrice||0, o.couponCode||'', o.discount||0, o.total, o.status, o.id
+      o.subtotal??o.total, o.zonePrice||0, o.couponCode||'', o.discount||0, o.total, o.status, o.id, o.sellerName||'', o.payMethod||''
     ]);
   });
   const csv = rows.map(r=>r.map(v=>`"${String(v).replace(/"/g,'""')}"`).join(',')).join('\n');
@@ -2347,11 +2363,13 @@ function viewAdminPedidoDetalle(orderId){
         <select class="field" id="order-status-select" onchange="updateOrderStatus('${o.id}', this.value)">
           <option value="nuevo" ${o.status==='nuevo'?'selected':''}>Nuevo</option>
           <option value="revisado" ${o.status==='revisado'?'selected':''}>Revisado</option>
+          ${wsStatusOption(o)}
           <option value="completado" ${o.status==='completado'?'selected':''}>Completado</option>
           <option value="cancelado" ${o.status==='cancelado'?'selected':''}>Cancelado</option>
         </select>
       </div>
 
+      ${wsOrderExtraHtml(o)}
       <h3>Productos pedidos</h3>
       ${o.items.map((it,i)=>`
         <div class="cart-item" style="align-items:flex-start;">
@@ -2383,11 +2401,14 @@ function viewAdminPedidoDetalle(orderId){
   ${renderFooter()}`;
 }
 async function updateOrderStatus(orderId, status){
-  const order = {...ORDERS[orderId], status, updatedAt: Date.now()};
-  const result = await withTimeout(dbMergeOrder(order), 8000);
+  const r = await wsStatusChange(orderId, status);
+  if(!r){ render(); return; }
+  const result = await withTimeout(dbMergeOrder(r.order), 8000);
   if(result==='__timeout__' || result===false) return;
-  ORDERS = {...ORDERS, [orderId]: order};
+  ORDERS = {...ORDERS, [orderId]: r.order};
+  await wsAfterStatus(r);
   toast('Estado actualizado.');
+  if(wsOn()) render();
 }
 async function toggleItemAvailable(orderId, itemIndex, available){
   const order = {...ORDERS[orderId], updatedAt: Date.now()};
@@ -2506,8 +2527,8 @@ function viewAdminPublicar(editId){
   const editing = editId ? PRODUCTS[editId] : null;
   if(!editId && Object.keys(PRODUCTS).length >= productsAllowed()){ return lockedView('Llegaste al límite de productos de tu plan'); }
   if(editId && !editing){ navigate('#/admin'); return ''; }
-  if(editing){ productFormImages = editing.images ? editing.images.slice() : []; productFormVariants = editing.variants ? editing.variants.slice() : []; }
-  else if(!window.__keepImgs){ productFormImages = []; productFormVariants = []; }
+  if(editing){ productFormImages = editing.images ? editing.images.slice() : []; productFormVariants = editing.variants ? editing.variants.slice() : []; productFormTiers = (editing.tiers||[]).map(t=>({...t})); }
+  else if(!window.__keepImgs){ productFormImages = []; productFormVariants = []; productFormTiers = []; }
   window.__keepImgs = false;
   return `
   ${renderHeader()}
@@ -2575,6 +2596,7 @@ function viewAdminPublicar(editId){
             </select>
           </div>
         </div>
+        ${wsProductFormHtml(editing)}
         <div class="form-row">
           <label>Variantes (opcional, ej: tamaños o sabores)</label>
           <p class="hint" style="margin-bottom:8px;">Si cargás variantes, el cliente va a tener que elegir una antes de agregar al carrito. "Máx. sabores": para helados, cuántos sabores puede elegir en ese tamaño (0 = no pide sabores; los sabores se cargan en el panel, en "🍨 Sabores"). El precio de arriba es el precio base y NO aparece como opción: si querés que el cliente pueda elegirlo, cargalo también como variante con ajuste 0 (ej: "1/4 kilo", 0).</p>
@@ -2707,16 +2729,17 @@ async function submitProduct(ev, editId){
   updatedProducts[id] = {
     id, name:f.get('name'), kind: isSrv?'servicio':'producto', cartEnabled: wantsCart, gallery: f.get('gallery')||'classic', collageLayout: f.get('collageLayout')||'mosaic', fx: f.get('fx')||'fade', secs: Number(f.get('secs'))||3, waPhone: (f.get('waPhone')||'').trim(), price:Number(f.get('price'))||0, oldPrice: f.get('oldPrice')?Number(f.get('oldPrice')):null,
     description:f.get('description')||'', category:f.get('category'), stock: isSrv ? 999 : Number(f.get('stock')), status:f.get('status'),
-    images: imagesFinal, imgDoc: true,
+    images: imagesFinal, thumb:'', thumbFor:'',
     variants: productFormVariants.filter(v=>v.name && v.name.trim()),
+    ...wsProductFields(f, existing),
     createdAt: existing ? existing.createdAt : Date.now()
   };
 
   setBusy(true);
-  const imgChars = imagesFinal.reduce((a,x)=>a+x.length,0);
-  const imgSaved = await withTimeout(dbSave('pimg_'+id, imagesFinal), 15000);
-  if(imgSaved === '__timeout__' || imgSaved === false){ setBusy(false); if(imgSaved==='__timeout__') toast('El guardado de fotos está tardando demasiado. Revisá tu conexión.'); return false; }
-  const result = await withTimeout(dbSave('products', productsForSave(updatedProducts)), 8000);
+  { const first = imagesFinal.find(x=>x!==PLACEHOLDER_IMG); let th = '', thFor = '';
+    if(first){ if(existing && existing.thumb && existing.thumbFor===first){ th = existing.thumb; thFor = first; } else { th = await makeThumb(first); thFor = th ? first : ''; } }
+    updatedProducts[id].thumb = th; updatedProducts[id].thumbFor = thFor; }
+  const result = await withTimeout(prodSave(updatedProducts[id]), 25000);
   setBusy(false);
   if(result === '__timeout__'){ toast('El guardado está tardando demasiado. Revisá tu conexión a internet e intentá de nuevo.'); return false; }
   if(result === false) return false; // dbSave ya avisó el motivo
@@ -2730,28 +2753,950 @@ async function submitProduct(ev, editId){
 
 
 /* =========================================================================
+   MODO MAYORISTA
+   - Precios por escala, pedido mínimo, venta por caja, stock automático
+   - Listas de precio por cliente, aprobación de clientes
+   - Vendedores (cargan pedidos a nombre de un cliente) y cuenta corriente
+   Todo se guarda en store_docs:  cm_<cliente> (datos del cliente para el comercio),
+   led_<id> (movimientos de cuenta corriente), sel_<vendedor> (datos del vendedor).
+   ========================================================================= */
+let sellerSession = false;
+let CMETA = {}, LEDGER = [], SELLER_LIST = null, SELLER_DOCS = {}, MY_SELLER = null, MY_CUSTOMERS = {};
+let productFormTiers = [];
+let SELL = null;
+
+function W(){ return (CONFIG && CONFIG.wholesale) || {}; }
+function wsOn(){ return !!(STORE && CONFIG && feat('wholesale') && W().enabled); }
+function wsLists(){ return W().priceLists || []; }
+function wsListName(id){ const l = wsLists().find(x=>x.id===id); return l ? l.name : ''; }
+function wsMyWl(){ const c = getCustomer(); return (c && c.wl) || {}; }
+function wsMyList(){ return wsMyWl().priceList || W().defaultList || ''; }
+function wsApproved(){ if(!wsOn() || !W().approval) return true; return !!wsMyWl().approved; }
+function wsMin(p){ return wsOn() ? Math.max(1, Math.floor(Number(p && p.minQty)||1)) : 1; }
+function wsMaxQty(p){ if(!wsOn() || !W().trackStock || !p || isService(p)) return 99999; return Math.max(0, Math.floor(Number(p.stock)||0)); }
+function priceFor(p, variantName, qty, listId){
+  const baseVn = String(variantName||'').split(' · ')[0];
+  const variant = (p.variants||[]).find(v=>v.name===baseVn);
+  let price = Number(p.price)||0;
+  if(wsOn() && p.tiers && p.tiers.length){
+    const t = p.tiers.filter(t=>qty>=Number(t.min)).sort((a,b)=>b.min-a.min)[0];
+    if(t) price = Number(t.price);
+  }
+  price += variant ? (Number(variant.priceDelta)||0) : 0;
+  if(wsOn() && listId){ const l = wsLists().find(x=>x.id===listId); if(l) price = Math.round(price*(1-(Number(l.disc)||0)/100)); }
+  return price;
+}
+function wsPayMethod(){ const el = document.getElementById('pay-method'); return el ? el.value : (window.__payMethod || 'contado'); }
+
+/* ---------- lado cliente: ficha, carrito, cuenta ---------- */
+function wsCardExtra(p){
+  if(!wsOn()) return '';
+  const bits = [];
+  if(p.unit) bits.push(escapeHtml(p.unit));
+  if(wsMin(p)>1) bits.push('mín. '+wsMin(p));
+  const lo = (p.tiers&&p.tiers.length) ? Math.min(...p.tiers.map(t=>priceFor(p,'',t.min,wsMyList()))) : 0;
+  return (bits.length ? `<div class="hint" style="margin:0 0 2px;">${bits.join(' · ')}</div>` : '') + (lo ? `<div class="hint" style="color:var(--teal-dark,#0f6b63); font-weight:700; margin:0;">Por mayor desde ${money(lo)}</div>` : '');
+}
+function wsTierBox(p){
+  if(!wsOn()) return '';
+  const vn = window.__pdVariant || '';
+  const rows = [];
+  if(p.unit) rows.push(`📦 Se vende por: <b>${escapeHtml(p.unit)}</b>`);
+  if(wsMin(p)>1) rows.push(`Pedido mínimo: <b>${wsMin(p)}</b>`);
+  const tiers = (p.tiers||[]).slice().sort((a,b)=>a.min-b.min);
+  if(tiers.length){
+    rows.push('<b>Precios por cantidad:</b>');
+    rows.push(`1+ → ${money(priceFor(Object.assign({}, p, {tiers:[]}), vn, 1, wsMyList()))}` + tiers.map(t=>` · ${t.min}+ → <b>${money(priceFor(p, vn, t.min, wsMyList()))}</b>`).join(''));
+  }
+  if(W().trackStock && !isService(p)) rows.push(`Stock disponible: <b>${wsMaxQty(p)}</b>`);
+  if(wsListName(wsMyList())) rows.push(`Tu lista de precios: <b>${escapeHtml(wsListName(wsMyList()))}</b>`);
+  return rows.length ? `<div style="background:var(--teal-tint,#e6f4f3); border-radius:12px; padding:8px 10px; margin:6px 0; font-size:12px; line-height:1.6;">${rows.join('<br>')}</div>` : '';
+}
+function wsLineWarn(it){
+  if(!wsOn()) return '';
+  const w = [], p = PRODUCTS[it.productId]||{};
+  if(it.qty<it.minQty) w.push('Mínimo '+it.minQty);
+  if(it.qty>it.maxQty) w.push('Solo hay '+it.maxQty+' en stock');
+  let out = w.length ? `<div class="hint" style="color:var(--coral); font-weight:700;">⚠️ ${w.join(' · ')}</div>` : '';
+  const nxt = (p.tiers||[]).filter(t=>Number(t.min)>it.qty).sort((a,b)=>a.min-b.min)[0];
+  if(nxt) out += `<div class="hint" style="color:var(--teal-dark,#0f6b63);">💡 Con ${nxt.min} o más pagás ${money(priceFor(p, it.variantName, nxt.min, wsMyList()))} c/u</div>`;
+  return out;
+}
+function wsCartBox(tot){
+  if(!wsOn()) return '';
+  let h = '';
+  if(W().approval && !wsApproved()) h += `<div class="form-card" style="background:#fff3d6; border:1px solid #f0d58a; margin-top:12px;"><strong>⏳ Tu cuenta está pendiente de aprobación.</strong><p class="hint" style="margin:4px 0 0;">Podés armar tu carrito. ${escapeHtml(CONFIG.businessName)} tiene que aprobar tu cuenta antes de que puedas confirmar pedidos.</p></div>`;
+  const mo = Number(W().minOrder)||0;
+  if(mo>0){
+    const ok = tot.subtotal>=mo;
+    h += `<p class="hint" style="margin-top:10px; font-weight:700; color:${ok?'var(--teal-dark,#0f6b63)':'var(--coral)'};">${ok?'✅':'⚠️'} Pedido mínimo: ${money(mo)}${ok?'':' · te faltan '+money(mo-tot.subtotal)}</p>`;
+  }
+  const wl = wsMyWl();
+  if(feat('credit') && wl.creditEnabled){
+    const lim = Number(wl.creditLimit)||0, bal = Number(wl.balance)||0;
+    h += `<div class="form-row" style="margin-top:10px;"><label>Forma de pago</label>
+      <select class="field" id="pay-method" onchange="window.__payMethod=this.value">
+        <option value="contado" ${window.__payMethod!=='credito'?'selected':''}>Contado / al recibir</option>
+        <option value="credito" ${window.__payMethod==='credito'?'selected':''}>A cuenta (crédito)</option>
+      </select>
+      <p class="hint">Tu saldo: ${money(bal)}${lim>0?' · límite '+money(lim)+' · disponible '+money(Math.max(0,lim-bal)):''}</p></div>`;
+  }
+  return h;
+}
+function wsCheckout(items){
+  if(!wsOn()) return '';
+  if(W().approval && !wsApproved()) return 'Tu cuenta todavía está pendiente de aprobación.';
+  for(const it of items){
+    if(it.qty<it.minQty) return it.name+': el mínimo es '+it.minQty+'.';
+    if(it.qty>it.maxQty) return it.name+': solo hay '+it.maxQty+' en stock.';
+  }
+  const sub = items.reduce((a,i)=>a+i.price*i.qty,0);
+  const mo = Number(W().minOrder)||0;
+  if(mo>0 && sub<mo) return 'El pedido mínimo es '+money(mo)+'. Te faltan '+money(mo-sub)+'.';
+  if(wsPayMethod()==='credito'){
+    const wl = wsMyWl(), lim = Number(wl.creditLimit)||0, bal = Number(wl.balance)||0;
+    if(!wl.creditEnabled) return 'No tenés cuenta corriente habilitada.';
+    if(lim>0 && bal+getOrderTotals().total>lim) return 'Superás tu límite de crédito ('+money(lim)+'). Tu saldo actual es '+money(bal)+'.';
+  }
+  return '';
+}
+function wsOrderExtras(){
+  if(!wsOn()) return {};
+  const l = wsMyList();
+  return {payMethod: wsPayMethod(), listId: l, listName: wsListName(l)};
+}
+function wsAccountBox(){
+  if(!wsOn() || !AUTH_USER) return '';
+  const wl = wsMyWl(); const rows = [];
+  if(W().approval) rows.push(wl.approved ? '✅ Cuenta aprobada' : '⏳ Cuenta pendiente de aprobación');
+  if(wsListName(wsMyList())) rows.push('💲 Lista de precios: <b>'+escapeHtml(wsListName(wsMyList()))+'</b>');
+  if(feat('credit') && wl.creditEnabled){ const lim = Number(wl.creditLimit)||0; rows.push('💳 Cuenta corriente · saldo <b>'+money(wl.balance||0)+'</b>'+(lim>0?' · límite '+money(lim):'')); }
+  return rows.length ? `<div style="background:var(--teal-tint,#e6f4f3); border-radius:12px; padding:10px 12px; margin:10px 0; font-size:13px; line-height:1.7;">${rows.join('<br>')}<div class="hint" style="margin:4px 0 0;">Estos datos los define el comercio.</div></div>` : '';
+}
+
+/* ---------- datos para administrador y vendedor ---------- */
+async function wsQuery(pattern){
+  const {data, error} = await sb.from('store_docs').select('key,data').eq('store_id', STORE.id).like('key', pattern);
+  if(error){ console.error(error); return []; }
+  return data || [];
+}
+async function wsLoadMeta(){
+  if(!sb || !STORE || !adminSession || !wsOn()) return;
+  const [cm, led, sel] = await Promise.all([wsQuery('cm\\_%'), wsQuery('led\\_%'), wsQuery('sel\\_%')]);
+  CMETA = {}; cm.forEach(r=>{ if(r.data && r.data.uid) CMETA[r.data.uid] = r.data; });
+  LEDGER = led.map(r=>r.data).filter(Boolean);
+  SELLER_DOCS = {}; sel.forEach(r=>{ if(r.data && r.data.uid) SELLER_DOCS[r.data.uid] = r.data; });
+  if(feat('sellers')){
+    try{ const r = await sb.rpc('store_list_sellers', {p_store: STORE.id}); SELLER_LIST = (r && !r.error && Array.isArray(r.data)) ? r.data : []; }catch(e){ SELLER_LIST = []; }
+  } else SELLER_LIST = [];
+}
+async function loadSellerData(){
+  ORDERS = {}; MY_CUSTOMERS = {}; CMETA = {}; MY_SELLER = {commission:0};
+  if(!sb || !STORE) return;
+  const [o, c, m, s] = await Promise.all([wsQuery('order\\_%'), wsQuery('cust\\_%'), wsQuery('cm\\_%'), sb.from('store_docs').select('data').eq('store_id', STORE.id).eq('key', 'sel_'+AUTH_USER.uid).maybeSingle()]);
+  o.forEach(r=>{ if(r.data && r.data.id) ORDERS[r.data.id] = r.data; });
+  c.forEach(r=>{ if(r.data && r.data.id) MY_CUSTOMERS[r.data.id] = r.data; });
+  m.forEach(r=>{ if(r.data && r.data.uid) CMETA[r.data.uid] = r.data; });
+  if(s && s.data && s.data.data) MY_SELLER = s.data.data;
+}
+function wsBalance(uid){ return LEDGER.filter(e=>e.uid===uid).reduce((a,e)=>a+(e.type==='pago' ? -1 : 1)*(Number(e.amount)||0), 0); }
+async function wsMirror(uid){
+  try{
+    const m = CMETA[uid]||{}; const key = 'cust_'+uid;
+    const {data} = await sb.from('store_docs').select('data').eq('store_id', STORE.id).eq('key', key).maybeSingle();
+    if(!data || !data.data) return;
+    const wl = {priceList:m.priceList||'', approved:!!m.approved, creditEnabled:!!m.creditEnabled, creditLimit:Number(m.creditLimit)||0, balance:wsBalance(uid), seller:m.seller||''};
+    const d = {...data.data, wl};
+    await sb.from('store_docs').upsert({store_id: STORE.id, key, data: d}, {onConflict:'store_id,key'});
+    if(CUSTOMERS && CUSTOMERS[uid]) CUSTOMERS[uid].wl = wl;
+  }catch(e){ console.error(e); }
+}
+async function wsSaveMeta(uid, patch){
+  const cur = {uid, ...(CMETA[uid]||{}), ...patch};
+  const ok = await dbSave('cm_'+uid, cur); if(ok===false) return false;
+  CMETA[uid] = cur; await wsMirror(uid); return true;
+}
+function wsRefreshClients(){ const box = document.getElementById('cli-list'); if(box) box.innerHTML = cliListHtml(); }
+
+/* ---------- Clientes: controles mayoristas ---------- */
+function wsCliControls(c){
+  if(!wsOn() || !c.uid) return '';
+  const m = CMETA[c.uid] || {};
+  const lists = wsLists();
+  const sellers = (SELLER_LIST||[]);
+  const bal = wsBalance(c.uid);
+  return `<div style="border-top:1px dashed var(--line); margin-top:10px; padding-top:8px; font-size:13px;">
+    ${W().approval ? `<div style="margin-bottom:6px;">${m.approved ? '✅ Aprobado' : '⏳ <b>Pendiente de aprobación</b>'}
+      <button type="button" class="btn ${m.approved?'btn-outline':'btn-mango'} btn-sm" style="margin-left:6px;" onclick="wsApprove('${c.uid}', ${m.approved?'false':'true'})">${m.approved?'Quitar aprobación':'✅ Aprobar'}</button></div>` : ''}
+    <div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:6px;">
+      <label class="hint" style="margin:0;">Lista de precios</label>
+      <select class="field" style="width:auto; padding:6px 8px;" onchange="wsSetField('${c.uid}','priceList',this.value)">
+        <option value="">Normal${W().defaultList?' (usa la lista general)':''}</option>
+        ${lists.map(l=>`<option value="${l.id}" ${m.priceList===l.id?'selected':''}>${escapeHtml(l.name)} (-${Number(l.disc)||0}%)</option>`).join('')}
+      </select>
+    </div>
+    ${feat('sellers') ? `<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-bottom:6px;">
+      <label class="hint" style="margin:0;">Vendedor</label>
+      <select class="field" style="width:auto; padding:6px 8px;" onchange="wsSetField('${c.uid}','seller',this.value)">
+        <option value="">Sin vendedor</option>
+        ${sellers.map(s=>`<option value="${s.user_id}" ${m.seller===s.user_id?'selected':''}>${escapeHtml(s.email)}</option>`).join('')}
+      </select></div>` : ''}
+    ${feat('credit') ? `<div style="display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
+      <span>💳 Cuenta corriente: <b>${m.creditEnabled?'habilitada':'no'}</b>${m.creditEnabled && Number(m.creditLimit)>0 ? ' · límite '+money(m.creditLimit) : ''}${(m.creditEnabled||bal)? ' · saldo <b>'+money(bal)+'</b>' : ''}</span>
+      <button type="button" class="btn btn-outline btn-sm" onclick="wsCreditSetup('${c.uid}')">${m.creditEnabled?'Cambiar':'Habilitar'}</button>
+    </div>` : ''}
+  </div>`;
+}
+async function wsApprove(uid, yes){
+  if(await wsSaveMeta(uid, {approved: !!yes})){ toast(yes?'Cliente aprobado.':'Aprobación quitada.'); wsRefreshClients(); }
+}
+async function wsSetField(uid, k, v){
+  if(await wsSaveMeta(uid, {[k]: v})){ toast('Guardado.'); wsRefreshClients(); }
+}
+async function wsCreditSetup(uid){
+  const m = CMETA[uid] || {};
+  const v = prompt('Límite de crédito en ₲ (0 = sin límite). Para quitar la cuenta corriente escribí "no".', String(m.creditLimit||0));
+  if(v===null) return;
+  if(String(v).trim().toLowerCase()==='no'){ if(await wsSaveMeta(uid, {creditEnabled:false})){ toast('Cuenta corriente desactivada.'); wsRefreshClients(); } return; }
+  const n = Math.max(0, Math.round(Number(String(v).replace(/[^\d]/g,''))||0));
+  if(await wsSaveMeta(uid, {creditEnabled:true, creditLimit:n})){ toast('Cuenta corriente habilitada.'); wsRefreshClients(); }
+}
+async function wsNewCustomer(){
+  const name = (prompt('Nombre del cliente o negocio')||'').trim(); if(!name) return;
+  const phone = normPhone(prompt('WhatsApp del cliente (opcional)')||'');
+  const address = (prompt('Dirección o zona (opcional)')||'').trim();
+  const id = 'm_' + Math.random().toString(36).slice(2,10) + Date.now().toString(36).slice(-3);
+  const seller = sellerSession ? AUTH_USER.uid : '';
+  const wl = {priceList:'', approved:true, creditEnabled:false, creditLimit:0, balance:0, seller};
+  const c = {id, uid:id, manual:true, name, phone, address, createdAt:Date.now(), updatedAt:Date.now(), wl};
+  const cm = {uid:id, approved:true, seller, priceList:'', creditEnabled:false, creditLimit:0};
+  const r1 = await sb.from('store_docs').insert({store_id: STORE.id, key:'cust_'+id, data:c});
+  if(r1.error){ toast('No se pudo crear el cliente: '+r1.error.message); return; }
+  const r2 = await sb.from('store_docs').insert({store_id: STORE.id, key:'cm_'+id, data:cm});
+  if(r2.error){ toast('No se pudo crear el cliente: '+r2.error.message); return; }
+  CMETA[id] = cm;
+  if(sellerSession){ MY_CUSTOMERS[id] = c; toast('Cliente creado.'); render(); }
+  else { if(CUSTOMERS) CUSTOMERS[id] = c; toast('Cliente creado.'); wsRefreshClients(); const cnt = document.getElementById('cli-count'); if(cnt) cnt.textContent = Object.keys(CUSTOMERS||{}).length; }
+}
+
+/* ---------- Formulario de producto (mayorista) ---------- */
+function renderTierRows(){
+  if(!productFormTiers.length) return `<p class="hint">Sin escalas. Ej: "desde 10 unidades, ₲ 8.000 c/u".</p>`;
+  return productFormTiers.map((t,i)=>`<div style="display:flex; gap:6px; align-items:end; margin-bottom:6px;">
+    <div style="flex:1;"><label class="hint" style="display:block; margin-bottom:3px;">Desde (cantidad)</label><input class="field" type="number" min="2" value="${t.min||''}" oninput="productFormTiers[${i}].min=Number(this.value)||0"></div>
+    <div style="flex:1;"><label class="hint" style="display:block; margin-bottom:3px;">Precio c/u (₲)</label><input class="field" type="number" min="1" value="${t.price||''}" oninput="productFormTiers[${i}].price=Number(this.value)||0"></div>
+    <button type="button" class="btn btn-danger btn-sm" onclick="productFormTiers.splice(${i},1); document.getElementById('tiers-list').innerHTML=renderTierRows();">✕</button></div>`).join('');
+}
+function wsProductFormHtml(editing){
+  if(!wsOn()) return '';
+  return `<div class="form-row" style="border:1.5px dashed var(--teal-dark,#0f6b63); border-radius:14px; padding:12px;">
+    <label>🏭 Venta por mayor</label>
+    <input class="field" name="unit" placeholder="Se vende por (ej: Caja x12, Bolsa 5 kg, Unidad)" value="${escapeHtml(editing?.unit||'')}">
+    <p class="hint" style="margin:6px 0;">El precio de arriba es por esa unidad. El stock también se cuenta en esa unidad.</p>
+    <label class="hint" style="display:block; margin:6px 0 3px;">Cantidad mínima por pedido</label>
+    <input class="field" type="number" min="1" name="minQty" value="${editing?.minQty||1}">
+    <label class="hint" style="display:block; margin:10px 0 3px;">Escalas de precio (cuanto más compra, más barato)</label>
+    <div id="tiers-list">${renderTierRows()}</div>
+    <button type="button" class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="productFormTiers.push({min:0,price:0}); document.getElementById('tiers-list').innerHTML=renderTierRows();">+ Agregar escala</button>
+  </div>`;
+}
+function wsProductFields(f, existing){
+  const ex = existing || {};
+  if(!wsOn()) return {unit: ex.unit||'', minQty: ex.minQty||1, tiers: ex.tiers||[]};
+  const tiers = productFormTiers.map(t=>({min:Math.floor(Number(t.min)||0), price:Math.round(Number(t.price)||0)})).filter(t=>t.min>1 && t.price>0).sort((a,b)=>a.min-b.min);
+  return {unit: (f.get('unit')||'').trim(), minQty: Math.max(1, Math.floor(Number(f.get('minQty'))||1)), tiers};
+}
+
+/* ---------- Pedidos (administrador): controles, stock y cuenta ---------- */
+function wsOrderCheck(o){
+  const warn = [];
+  const uid = o.customerId; const m = uid ? CMETA[uid] : null;
+  if(W().approval && uid && !(m && m.approved) && !o.byStaff) warn.push('El cliente <b>no está aprobado</b>.');
+  const list = m ? (m.priceList || W().defaultList || '') : (W().defaultList || '');
+  let bad = false;
+  o.items.forEach(it=>{ const p = PRODUCTS[it.productId]; if(!p) return; const exp = priceFor(p, it.variantName, it.qty, list); if(Math.abs(exp-it.price)>1){ bad = true; warn.push(`${escapeHtml(it.name)}: pidió a ${money(it.price)} y le corresponde ${money(exp)}.`); } });
+  if(o.payMethod==='credito'){
+    if(!(m && m.creditEnabled)) warn.push('Pidió <b>a crédito</b> pero no tiene cuenta corriente habilitada.');
+    else { const lim = Number(m.creditLimit)||0, bal = wsBalance(uid); if(!o.ledgerApplied && lim>0 && bal+o.total>lim) warn.push(`Supera su límite de crédito (${money(lim)}). Saldo actual ${money(bal)}.`); }
+  }
+  return {warn, bad};
+}
+function wsOrderExtraHtml(o){
+  if(!wsOn()) return '';
+  const chk = wsOrderCheck(o);
+  const tags = [];
+  if(o.sellerName) tags.push('🧑‍💼 Vendedor: <b>'+escapeHtml(o.sellerName)+'</b>');
+  if(o.listName) tags.push('💲 Lista: <b>'+escapeHtml(o.listName)+'</b>');
+  tags.push(o.payMethod==='credito' ? '💳 Pago: <b>a cuenta (crédito)</b>' : '💵 Pago: contado');
+  if(o.stockApplied) tags.push('📦 Stock descontado');
+  if(o.ledgerApplied) tags.push('🧾 Cargado a la cuenta del cliente');
+  return `<div style="background:var(--teal-tint,#e6f4f3); border-radius:12px; padding:10px 12px; margin:10px 0; font-size:13px; line-height:1.7;">${tags.join('<br>')}</div>
+    ${chk.warn.length ? `<div style="background:#fff3d6; border:1px solid #f0d58a; border-radius:12px; padding:10px 12px; margin:10px 0; font-size:13px; line-height:1.6;"><b>⚠️ Revisá este pedido</b><br>${chk.warn.join('<br>')}${chk.bad ? `<br><button type="button" class="btn btn-mango btn-sm" style="margin-top:8px;" onclick="wsFixPrices('${o.id}')">Corregir precios</button>` : ''}</div>` : ''}
+    <button type="button" class="btn btn-outline btn-sm" onclick="wsPrintOrder('${o.id}')">🖨️ Imprimir / guardar PDF</button>`;
+}
+function wsStatusOption(o){
+  if(!wsOn() && o.status!=='confirmado') return '';
+  return `<option value="confirmado" ${o.status==='confirmado'?'selected':''}>Confirmado (descuenta stock / cuenta)</option>`;
+}
+async function wsFixPrices(orderId){
+  const o = ORDERS[orderId]; if(!o) return;
+  const m = o.customerId ? CMETA[o.customerId] : null;
+  const list = m ? (m.priceList || W().defaultList || '') : (W().defaultList || '');
+  const items = o.items.map(it=>{ const p = PRODUCTS[it.productId]; return p ? {...it, price: priceFor(p, it.variantName, it.qty, list)} : it; });
+  const subtotal = items.reduce((a,i)=>a+(i.available===false?0:i.price*i.qty),0) ;
+  const pct = o.couponCode ? ((CONFIG.coupons||[]).find(c=>c.code.toUpperCase()===String(o.couponCode).toUpperCase())||{}).percent||0 : 0;
+  const discount = Math.round(subtotal*pct/100);
+  const order = {...o, items, subtotal, discount, total: Math.max(0, subtotal + (Number(o.zonePrice)||0) - discount), listId: list, listName: wsListName(list), updatedAt: Date.now()};
+  if(await dbMergeOrder(order)){ ORDERS = {...ORDERS, [orderId]: order}; toast('Precios corregidos.'); render(); }
+}
+async function wsStatusChange(orderId, status){
+  const prev = ORDERS[orderId];
+  let order = {...prev, status, updatedAt: Date.now()};
+  if(!wsOn()) return {order, prev, fx:null};
+  const want = (status==='confirmado' || status==='completado');
+  const needStock = want && !prev.stockApplied && !!W().trackStock;
+  const needLedger = want && prev.payMethod==='credito' && !prev.ledgerApplied && feat('credit');
+  const undo = !want && (prev.stockApplied || prev.ledgerApplied);
+  if(needLedger){
+    const m = CMETA[prev.customerId] || {}, lim = Number(m.creditLimit)||0, bal = wsBalance(prev.customerId);
+    if(lim>0 && bal+prev.total>lim && !confirm('Este pedido supera el límite de crédito del cliente ('+money(lim)+', saldo '+money(bal)+'). ¿Confirmar igual?')) return null;
+  }
+  if(needStock){
+    const low = prev.items.filter(it=>it.available!==false && PRODUCTS[it.productId] && Number(PRODUCTS[it.productId].stock) < it.qty);
+    if(low.length && !confirm('Stock insuficiente de: '+low.map(i=>i.name+' (hay '+PRODUCTS[i.productId].stock+')').join(', ')+'. ¿Confirmar igual?')) return null;
+  }
+  if(needStock) order.stockApplied = true;
+  if(needLedger) order.ledgerApplied = true;
+  if(undo){ order.stockApplied = false; order.ledgerApplied = false; }
+  return {order, prev, fx:{needStock, needLedger, undo}};
+}
+async function wsAfterStatus(r){
+  if(!r || !r.fx) return;
+  const {order, prev, fx} = r;
+  if(fx.needStock || (fx.undo && prev.stockApplied)){
+    const sign = fx.needStock ? -1 : 1; const touched = new Set();
+    prev.items.filter(it=>it.available!==false).forEach(it=>{
+      const p = PRODUCTS[it.productId]; if(!p || isService(p)) return;
+      p.stock = Math.max(0, (Number(p.stock)||0) + sign*it.qty); touched.add(p.id);
+      if(sign<0 && p.stock===0 && p.status==='activo'){ p.status = 'agotado'; p.autoOut = true; }
+      if(sign>0 && p.stock>0 && p.status==='agotado' && p.autoOut){ p.status = 'activo'; delete p.autoOut; }
+    });
+    for(const pid of touched){ await prodSave(PRODUCTS[pid]); }
+  }
+  if(fx.needLedger){
+    const e = {id:'c_'+order.id, uid:order.customerId, name:order.customerName, type:'cargo', amount:order.total, orderId:order.id, note:'Pedido '+order.id.slice(-6), date:Date.now(), by:(AUTH_USER&&AUTH_USER.email)||''};
+    if(await dbSave('led_'+e.id, e) !== false){ LEDGER = LEDGER.filter(x=>x.id!==e.id).concat([e]); await wsMirror(order.customerId); }
+  }
+  if(fx.undo && prev.ledgerApplied){
+    await dbDelete('led_c_'+order.id); LEDGER = LEDGER.filter(x=>x.id!=='c_'+order.id); await wsMirror(order.customerId);
+  }
+}
+function wsPrintOrder(id){
+  const o = ORDERS[id]; if(!o) return;
+  const rows = o.items.map(it=>`<tr><td>${it.qty}</td><td>${escapeHtml(it.name)}${it.variantName?' ('+escapeHtml(it.variantName)+')':''}</td><td style="text-align:right">${money(it.price)}</td><td style="text-align:right">${money(it.price*it.qty)}</td></tr>`).join('');
+  const html = `<!doctype html><html><head><meta charset="utf-8"><title>Pedido ${o.id}</title><style>body{font-family:Arial,sans-serif;padding:20px;max-width:720px;margin:auto}table{width:100%;border-collapse:collapse;margin:12px 0}td,th{border-bottom:1px solid #ccc;padding:6px;text-align:left;font-size:14px}h1{font-size:20px;margin:0}small{color:#555}</style></head><body>
+    <h1>${escapeHtml(CONFIG.businessName)}</h1><small>Pedido N° ${o.id} · ${new Date(o.createdAt).toLocaleString('es-PY')}</small>
+    <p><b>Cliente:</b> ${escapeHtml(o.customerName)} · ${escapeHtml(o.customerPhone||'')}<br>${o.customerAddress?'<b>Dirección:</b> '+escapeHtml(o.customerAddress)+'<br>':''}${o.sellerName?'<b>Vendedor:</b> '+escapeHtml(o.sellerName)+'<br>':''}<b>Pago:</b> ${o.payMethod==='credito'?'A cuenta (crédito)':'Contado'}</p>
+    <table><tr><th>Cant.</th><th>Producto</th><th style="text-align:right">Precio</th><th style="text-align:right">Subtotal</th></tr>${rows}</table>
+    ${o.zoneName?`<p>Envío (${escapeHtml(o.zoneName)}): ${money(o.zonePrice)}</p>`:''}${o.discount?`<p>Descuento: -${money(o.discount)}</p>`:''}
+    <h2 style="text-align:right">Total: ${money(o.total)}</h2>${o.notes?`<p><b>Notas:</b> ${escapeHtml(o.notes)}</p>`:''}
+    <script>window.onload=function(){window.print();}<\/script></body></html>`;
+  const w = window.open('', '_blank'); if(!w){ toast('Permití las ventanas emergentes para imprimir.'); return; }
+  w.document.write(html); w.document.close();
+}
+
+/* ---------- Pantalla de configuración mayorista ---------- */
+let wsForm = null;
+function viewAdminMayorista(){
+  if(!gateAdmin()) return '';
+  if(!feat('wholesale')) return lockedView('Modo mayorista');
+  const w = W();
+  wsForm = {enabled: !!w.enabled, minOrder: Number(w.minOrder)||0, approval: !!w.approval, trackStock: !!w.trackStock, defaultList: w.defaultList||'', priceLists: (w.priceLists||[]).map(l=>({...l}))};
+  return `${renderHeader()}<div class="container section">
+    <div class="section-head"><h2>🏭 Modo mayorista</h2></div>
+    <div class="form-card">
+      <label style="display:flex; gap:8px; align-items:center; font-weight:700;"><input type="checkbox" id="ws-enabled" style="width:20px;height:20px;" ${wsForm.enabled?'checked':''}> Activar modo mayorista</label>
+      <p class="hint">Activa en cada producto: unidad de venta, cantidad mínima y escalas de precio. También activa listas de precio, pedido mínimo y stock.</p>
+      <div class="form-row"><label>Pedido mínimo (₲) — 0 si no hay</label><input class="field" type="number" id="ws-min" min="0" value="${wsForm.minOrder}"></div>
+      <label style="display:flex; gap:8px; align-items:flex-start; margin:10px 0;"><input type="checkbox" id="ws-appr" style="width:20px;height:20px;margin-top:2px;" ${wsForm.approval?'checked':''}> <span>Solo clientes <b>aprobados</b> pueden confirmar pedidos (tienen que entrar con Google y vos los aprobás en 👥 Clientes).<br><span class="hint">Los precios siguen siendo visibles en el catálogo; la aprobación controla quién puede pedir.</span></span></label>
+      <label style="display:flex; gap:8px; align-items:flex-start; margin:10px 0;"><input type="checkbox" id="ws-stock" style="width:20px;height:20px;margin-top:2px;" ${wsForm.trackStock?'checked':''}> <span>Controlar <b>stock</b>: no se puede pedir más de lo que hay, y se descuenta cuando pasás el pedido a "Confirmado".</span></label>
+      <h3 style="margin-top:16px;">💲 Listas de precio</h3>
+      <p class="hint">Cada lista es un descuento sobre el precio. Después le asignás una lista a cada cliente en 👥 Clientes. Ej: "Mayorista A" = 10%.</p>
+      <div id="ws-lists">${wsListRows()}</div>
+      <button type="button" class="btn btn-outline btn-sm" style="margin-top:6px;" onclick="wsAddList()">+ Agregar lista</button>
+      <div class="form-row" style="margin-top:12px;"><label>Lista general (para visitantes y clientes sin lista)</label><select class="field" id="ws-def">${wsDefOptions()}</select></div>
+      <button type="button" class="btn btn-mango btn-block" style="margin-top:14px;" onclick="wsSaveConfig(this)">Guardar</button>
+      <button type="button" class="btn btn-outline btn-block" style="margin-top:8px;" onclick="navigate('#/admin')">← Volver al panel</button>
+    </div></div>${renderFooter()}`;
+}
+function wsListRows(){
+  if(!wsForm.priceLists.length) return '<p class="hint">Sin listas.</p>';
+  return wsForm.priceLists.map((l,i)=>`<div style="display:flex; gap:6px; align-items:end; margin-bottom:6px;">
+    <div style="flex:2;"><label class="hint" style="display:block;margin-bottom:3px;">Nombre</label><input class="field" value="${escapeHtml(l.name)}" oninput="wsForm.priceLists[${i}].name=this.value"></div>
+    <div style="flex:1;"><label class="hint" style="display:block;margin-bottom:3px;">Descuento %</label><input class="field" type="number" min="0" max="90" value="${l.disc||0}" oninput="wsForm.priceLists[${i}].disc=Number(this.value)||0"></div>
+    <button type="button" class="btn btn-danger btn-sm" onclick="wsDelList(${i})">✕</button></div>`).join('');
+}
+function wsDefOptions(){ return `<option value="">Ninguna (precio normal)</option>` + wsForm.priceLists.filter(l=>l.name).map(l=>`<option value="${l.id}" ${wsForm.defaultList===l.id?'selected':''}>${escapeHtml(l.name)}</option>`).join(''); }
+function wsAddList(){ wsForm.priceLists.push({id:'l'+Math.random().toString(36).slice(2,7), name:'', disc:5}); document.getElementById('ws-lists').innerHTML = wsListRows(); }
+function wsDelList(i){ wsForm.priceLists.splice(i,1); document.getElementById('ws-lists').innerHTML = wsListRows(); document.getElementById('ws-def').innerHTML = wsDefOptions(); }
+async function wsSaveConfig(btn){
+  const lists = wsForm.priceLists.filter(l=>l.name && l.name.trim()).map(l=>({id:l.id, name:l.name.trim(), disc:Math.min(90, Math.max(0, Number(l.disc)||0))}));
+  const def = document.getElementById('ws-def').value;
+  const wholesale = {enabled: document.getElementById('ws-enabled').checked, minOrder: Math.max(0, Math.round(Number(document.getElementById('ws-min').value)||0)),
+    approval: document.getElementById('ws-appr').checked, trackStock: document.getElementById('ws-stock').checked, priceLists: lists, defaultList: lists.some(l=>l.id===def) ? def : ''};
+  if(btn) btn.disabled = true;
+  try{
+    const updated = {...CONFIG, wholesale};
+    const r = await withTimeout(dbSave('config', updated), 8000);
+    if(r==='__timeout__' || r===false) return;
+    CONFIG = updated; toast('Modo mayorista guardado.'); navigate('#/admin');
+  } finally { if(btn) btn.disabled = false; }
+}
+
+/* ---------- Cuenta corriente (administrador) ---------- */
+function viewAdminCuentas(){
+  if(!gateAdmin()) return '';
+  if(!wsOn() || !feat('credit')) return lockedView('Cuenta corriente');
+  return `${renderHeader()}<div class="container section">
+    <div class="section-head"><h2>💳 Cuenta corriente</h2></div>
+    <p class="hint">Los pedidos "a cuenta" se cargan acá cuando los pasás a <b>Confirmado</b>. Registrá los pagos que te hacen.</p>
+    <div id="cc-box">${emptyState('💳','Cargando...')}</div>
+    <button class="btn btn-outline btn-block" style="margin-top:14px;" onclick="navigate('#/admin')">← Volver al panel</button></div>${renderFooter()}`;
+}
+async function wsLoadCuentas(){
+  await wsLoadMeta(); await loadCustomersAdmin(); wsRenderCuentas();
+}
+function wsRenderCuentas(){
+  const box = document.getElementById('cc-box'); if(!box) return;
+  const ids = new Set(Object.keys(CMETA).filter(u=>CMETA[u].creditEnabled)); LEDGER.forEach(e=>ids.add(e.uid));
+  const rows = [...ids].map(uid=>({uid, c:(CUSTOMERS||{})[uid]||{name:(LEDGER.find(e=>e.uid===uid)||{}).name||uid, phone:''}, m:CMETA[uid]||{}, bal:wsBalance(uid)})).sort((a,b)=>b.bal-a.bal);
+  const total = rows.reduce((a,r)=>a+Math.max(0,r.bal),0);
+  if(!rows.length){ box.innerHTML = emptyState('💳','Todavía no hay clientes con cuenta corriente. Habilitala en 👥 Clientes.'); return; }
+  box.innerHTML = `<div class="form-card" style="margin-bottom:10px;"><b>Total por cobrar:</b> <span style="font-size:18px; font-weight:800; color:var(--teal-dark,#0f6b63);">${money(total)}</span></div>` + rows.map(r=>{
+    const lim = Number(r.m.creditLimit)||0;
+    const open = window.__ccOpen===r.uid;
+    const moves = LEDGER.filter(e=>e.uid===r.uid).sort((a,b)=>b.date-a.date);
+    return `<div class="cart-item" style="display:block;">
+      <div style="display:flex; justify-content:space-between; gap:8px;"><strong>${escapeHtml(r.c.name||'')}</strong><b style="color:${r.bal>0?'var(--coral)':'var(--teal-dark,#0f6b63)'};">${money(r.bal)}</b></div>
+      <div class="hint">${lim>0?'Límite '+money(lim)+' · disponible '+money(Math.max(0,lim-r.bal)):'Sin límite'}</div>
+      <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:8px;">
+        <button type="button" class="btn btn-mango btn-sm" onclick="wsPayment('${r.uid}')">💵 Registrar pago</button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="wsCharge('${r.uid}')">+ Cargo</button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="window.__ccOpen=${open?'null':`'${r.uid}'`}; wsRenderCuentas();">${open?'Ocultar':'Ver'} movimientos</button>
+        ${(r.c.phone && r.bal>0) ? `<a class="btn btn-whatsapp btn-sm" target="_blank" href="${waLink(r.c.phone, 'Hola '+r.c.name+'! Te escribimos de '+CONFIG.businessName+'. Tu saldo pendiente es '+money(r.bal)+'. ¡Gracias!')}">💬 Recordar</a>` : ''}
+      </div>
+      ${open ? `<div style="margin-top:8px; font-size:13px;">${moves.length ? moves.map(e=>`<div style="display:flex; justify-content:space-between; gap:8px; border-top:1px dashed var(--line); padding:4px 0;"><span>${new Date(e.date).toLocaleDateString('es-PY')} · ${e.type==='pago'?'💵 Pago':'🧾 Cargo'} ${escapeHtml(e.note||'')}</span><b>${e.type==='pago'?'-':''}${money(e.amount)}</b></div>`).join('') : '<span class="hint">Sin movimientos.</span>'}</div>` : ''}
+    </div>`;
+  }).join('');
+}
+async function wsAddEntry(uid, type, label){
+  const v = prompt(label); if(v===null) return;
+  const amount = Math.round(Number(String(v).replace(/[^\d]/g,''))||0);
+  if(amount<=0){ toast('Poné un monto válido.'); return; }
+  const note = (prompt('Nota (opcional)')||'').trim();
+  const c = (CUSTOMERS||{})[uid] || {};
+  const id = (type==='pago'?'p_':'x_') + Math.random().toString(36).slice(2,9) + Date.now().toString(36).slice(-3);
+  const e = {id, uid, name:c.name||'', type, amount, note, date:Date.now(), by:(AUTH_USER&&AUTH_USER.email)||''};
+  if(await dbSave('led_'+id, e) === false) return;
+  LEDGER.push(e); await wsMirror(uid); toast(type==='pago'?'Pago registrado.':'Cargo registrado.'); wsRenderCuentas();
+}
+function wsPayment(uid){ return wsAddEntry(uid, 'pago', 'Monto que pagó el cliente (₲)'); }
+function wsCharge(uid){ return wsAddEntry(uid, 'cargo', 'Monto del cargo (₲)'); }
+
+/* ---------- Vendedores (administrador) ---------- */
+function viewAdminVendedores(){
+  if(!gateAdmin()) return '';
+  if(!wsOn() || !feat('sellers')) return lockedView('Vendedores');
+  return `${renderHeader()}<div class="container section">
+    <div class="section-head"><h2>🧑‍💼 Vendedores</h2></div>
+    <div class="form-card">
+      <h3 style="margin-top:0;">Agregar vendedor</h3>
+      <p class="hint">Escribí el correo de Google del vendedor. <b>Tiene que haber entrado una vez</b> con ese Google en ${escapeHtml(PLATFORM.name)} (en <a href="${platformUrl()}" target="_blank" rel="noopener">${platformUrl()}</a>).</p>
+      <div style="display:flex; gap:8px;"><input class="field" id="sel-email" type="email" placeholder="correo@gmail.com"><button type="button" class="btn btn-mango btn-sm" onclick="wsAddSeller(this)">Agregar</button></div>
+      <p class="hint" style="margin-top:8px;">Después, el vendedor entra a la tienda, toca 5 veces el nombre (o entra a <b>#/admin</b>) y elige "Entrar con Google": le aparece su panel de vendedor.</p>
+    </div>
+    <div class="form-row" style="margin-top:12px;"><label>Período del reporte</label><select class="field" id="sel-per" onchange="wsRenderSellers()"><option value="month">Este mes</option><option value="all">Todo</option></select></div>
+    <div id="sel-box">${emptyState('🧑‍💼','Cargando...')}</div>
+    <button class="btn btn-outline btn-block" style="margin-top:14px;" onclick="navigate('#/admin')">← Volver al panel</button></div>${renderFooter()}`;
+}
+async function wsLoadSellers(){ await wsLoadMeta(); wsRenderSellers(); }
+function wsRenderSellers(){
+  const box = document.getElementById('sel-box'); if(!box) return;
+  const per = (document.getElementById('sel-per')||{}).value || 'month';
+  const now = new Date(); const from = per==='month' ? new Date(now.getFullYear(), now.getMonth(), 1).getTime() : 0;
+  const list = SELLER_LIST || [];
+  if(!list.length){ box.innerHTML = emptyState('🧑‍💼','Todavía no agregaste vendedores.'); return; }
+  box.innerHTML = list.map(s=>{
+    const d = SELLER_DOCS[s.user_id] || {commission:0};
+    const ords = Object.values(ORDERS).filter(o=>o.sellerId===s.user_id && o.status!=='cancelado' && o.createdAt>=from);
+    const total = ords.reduce((a,o)=>a+(o.total||0),0);
+    const com = Math.round(total*(Number(d.commission)||0)/100);
+    const nCli = Object.values(CMETA).filter(m=>m.seller===s.user_id).length;
+    return `<div class="cart-item" style="display:block;">
+      <div style="display:flex; justify-content:space-between; gap:8px; align-items:baseline;"><strong>${escapeHtml(s.email)}</strong><button type="button" class="btn btn-danger btn-sm" onclick="wsRemoveSeller('${s.user_id}')">Quitar</button></div>
+      <div class="hint" style="margin:4px 0;">👥 ${nCli} cliente${nCli===1?'':'s'} asignado${nCli===1?'':'s'} · 🧾 ${ords.length} pedido${ords.length===1?'':'s'} · vendió <b>${money(total)}</b></div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;"><label class="hint" style="margin:0;">Comisión %</label>
+        <input class="field" type="number" min="0" max="100" step="0.5" style="width:90px; padding:6px 8px;" value="${Number(d.commission)||0}" onchange="wsSaveSeller('${s.user_id}', this.value)">
+        <span>= <b>${money(com)}</b></span></div></div>`;
+  }).join('');
+}
+async function wsSaveSeller(uid, v){
+  const s = (SELLER_LIST||[]).find(x=>x.user_id===uid) || {};
+  const d = {uid, email:s.email||'', commission: Math.min(100, Math.max(0, Number(v)||0))};
+  if(await dbSave('sel_'+uid, d) !== false){ SELLER_DOCS[uid] = d; toast('Comisión guardada.'); wsRenderSellers(); }
+}
+async function wsAddSeller(btn){
+  const email = (document.getElementById('sel-email').value||'').trim();
+  if(!/^\S+@\S+\.\S+$/.test(email)){ toast('Escribí un correo válido.'); return; }
+  const l = lim('max_sellers'); if(l>=0 && (SELLER_LIST||[]).length >= l){ toast('Llegaste al límite de vendedores de tu plan.'); return; }
+  if(btn) btn.disabled = true;
+  try{
+    const r = await sb.rpc('store_add_seller', {p_store: STORE.id, p_email: email});
+    if(r.error){ toast('No se pudo agregar: '+r.error.message); return; }
+    if(r.data==='no_user'){ toast('Esa persona todavía no entró con Google en la plataforma. Pedile que entre una vez y volvé a intentar.'); return; }
+    if(r.data==='exists'){ toast('Esa persona ya tiene acceso a la tienda.'); return; }
+    document.getElementById('sel-email').value = ''; toast('Vendedor agregado.'); await wsLoadSellers();
+  } finally { if(btn) btn.disabled = false; }
+}
+async function wsRemoveSeller(uid){
+  if(!confirm('¿Quitar a este vendedor? Sus pedidos anteriores se conservan.')) return;
+  const r = await sb.rpc('store_remove_seller', {p_store: STORE.id, p_user: uid});
+  if(r.error){ toast('No se pudo quitar: '+r.error.message); return; }
+  await dbDelete('sel_'+uid);
+  for(const m of Object.values(CMETA).filter(m=>m.seller===uid)){ await wsSaveMeta(m.uid, {seller:''}); }
+  toast('Vendedor quitado.'); await wsLoadSellers();
+}
+
+/* ---------- Panel del vendedor ---------- */
+function viewVendedor(sub){
+  if(adminSession) return `${renderHeader()}<div class="container section"><div class="form-card" style="text-align:center;"><p>Estás como administrador: usá el panel de administración.</p><button class="btn btn-outline btn-block" onclick="navigate('#/admin')">🛠️ Ir al panel</button></div></div>${renderFooter()}`;
+  if(!sellerSession) return viewAdminGate();
+  if(!(wsOn() && feat('sellers'))) return `${renderHeader()}<div class="container section"><div class="form-card" style="text-align:center;"><p>El plan de esta tienda no incluye vendedores por ahora.</p><button class="btn btn-outline btn-block" onclick="logout()">🚪 Salir</button></div></div>${renderFooter()}`;
+  if(sub==='pedido') return viewSellerOrder();
+  const mine = Object.values(ORDERS).filter(o=>o.sellerId===AUTH_USER.uid).sort((a,b)=>b.createdAt-a.createdAt);
+  const valid = mine.filter(o=>o.status!=='cancelado');
+  const now = new Date(); const from = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+  const mo = valid.filter(o=>o.createdAt>=from); const tm = mo.reduce((a,o)=>a+(o.total||0),0);
+  const com = Number(MY_SELLER && MY_SELLER.commission)||0;
+  const custs = Object.values(MY_CUSTOMERS).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  return `${renderHeader()}<div class="container section">
+    <div class="section-head"><h2>🧑‍💼 Panel de vendedor</h2><span class="hint" style="margin:0;">Versión ${APP_VERSION_FULL}</span></div>
+    <p class="hint" style="margin-top:-4px;">${escapeHtml(AUTH_USER.displayName||AUTH_USER.email||'')} · ${escapeHtml(CONFIG.businessName)}</p>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="n">${mo.length}</div><div class="l">🧾 Pedidos del mes</div></div>
+      <div class="stat-card"><div class="n" style="font-size:17px;">${money(tm)}</div><div class="l">💰 Vendido en el mes</div></div>
+      ${com>0 ? `<div class="stat-card"><div class="n" style="font-size:17px;">${money(Math.round(tm*com/100))}</div><div class="l">🎯 Comisión (${com}%)</div></div>` : ''}
+      <div class="stat-card"><div class="n">${custs.length}</div><div class="l">👥 Mis clientes</div></div>
+    </div>
+    <div class="act-grid">
+      <button class="act-tile main" onclick="sellStart('')"><span class="ic">➕</span>Nuevo pedido</button>
+      <button class="act-tile" onclick="wsNewCustomer()"><span class="ic">🧑</span>Cliente nuevo</button>
+      <button class="act-tile" onclick="navigate('#/')"><span class="ic">🏠</span>Ver catálogo</button>
+      <button class="act-tile" onclick="logout()"><span class="ic">🚪</span>Salir</button>
+    </div>
+    <div class="section"><div class="section-head"><h2>👥 Mis clientes</h2></div>
+      ${custs.length ? custs.map(c=>`<div class="cart-item" style="display:block;">
+        <div style="display:flex; justify-content:space-between; gap:8px;"><strong>${escapeHtml(c.name)}</strong>${(c.wl&&c.wl.creditEnabled)?`<span class="hint" style="margin:0;">💳 saldo ${money(c.wl.balance||0)}</span>`:''}</div>
+        <div class="hint">${escapeHtml(c.phone||'')}${c.address?' · '+escapeHtml(c.address):''}</div>
+        <div style="display:flex; gap:6px; flex-wrap:wrap; margin-top:6px;"><button type="button" class="btn btn-mango btn-sm" onclick="sellStart('${c.id}')">➕ Pedido</button>${c.phone?`<a class="btn btn-whatsapp btn-sm" target="_blank" href="${waLink(c.phone,'Hola '+c.name+'!')}">💬</a>`:''}</div></div>`).join('') : emptyState('👥','Todavía no tenés clientes asignados. Creá uno con "Cliente nuevo" o pedile al administrador que te asigne.')}
+    </div>
+    <div class="section"><div class="section-head"><h2>🧾 Mis pedidos</h2></div>
+      ${mine.length ? mine.slice(0,30).map(o=>`<div class="order-card"><div style="display:flex; justify-content:space-between; align-items:center;" onclick="window.__justOrdered=null; navigate('#/pedido/${o.id}')"><strong>${escapeHtml(o.customerName)}</strong><span class="order-status order-status-${o.status}">${o.status}</span></div>
+        <div class="hint" style="margin-top:4px;">${new Date(o.createdAt).toLocaleString('es-PY')} · ${money(o.total)}</div>
+        ${o.customerPhone ? `<a class="btn btn-whatsapp btn-sm" style="margin-top:6px;" target="_blank" href="${waLink(o.customerPhone,'Hola '+o.customerName+'! Te paso el detalle de tu pedido en '+CONFIG.businessName+': '+baseUrl()+'#/pedido/'+o.id)}">💬 Enviar al cliente</a>` : ''}</div>`).join('') : emptyState('🧾','Todavía no cargaste pedidos.')}
+    </div></div>${renderFooter()}`;
+}
+function sellStart(cid){ SELL = {cid: cid||'', q:'', cq:'', lines:{}, notes:'', pay:'contado'}; navigate('#/vendedor/pedido'); render(); }
+function sellCust(){ return SELL && SELL.cid ? MY_CUSTOMERS[SELL.cid] : null; }
+function sellList(){ const m = SELL && SELL.cid ? CMETA[SELL.cid] : null; return (m && m.priceList) || W().defaultList || ''; }
+function viewSellerOrder(){
+  if(!SELL) SELL = {cid:'', q:'', cq:'', lines:{}, notes:'', pay:'contado'};
+  const c = sellCust();
+  if(!c){
+    return `${renderHeader()}<div class="container section"><div class="section-head"><h2>➕ Nuevo pedido</h2></div>
+      <p class="hint">1) Elegí el cliente</p>
+      <input class="field" id="sell-cq" placeholder="Buscar cliente..." value="${escapeHtml(SELL.cq)}" oninput="SELL.cq=this.value; sellRefreshClients()">
+      <div id="sell-clients" style="margin-top:10px;">${sellClientsHtml()}</div>
+      <button class="btn btn-outline btn-block" style="margin-top:10px;" onclick="wsNewCustomer()">🧑 Cliente nuevo</button>
+      <button class="btn btn-outline btn-block" style="margin-top:8px;" onclick="navigate('#/vendedor')">← Volver</button></div>${renderFooter()}`;
+  }
+  const wl = c.wl || {}; const ln = wsListName(sellList());
+  return `${renderHeader()}<div class="container section" style="padding-bottom:90px;">
+    <div class="section-head"><h2>➕ Pedido para ${escapeHtml(c.name)}</h2></div>
+    <p class="hint">${ln?'💲 Lista: <b>'+escapeHtml(ln)+'</b> · ':''}${(feat('credit') && wl.creditEnabled)?'💳 Saldo '+money(wl.balance||0)+(Number(wl.creditLimit)>0?' / límite '+money(wl.creditLimit):'')+' · ':''}<a href="#" onclick="SELL.cid=''; SELL.lines={}; render(); return false;">Cambiar cliente</a></p>
+    <input class="field" id="sell-q" placeholder="Buscar producto..." value="${escapeHtml(SELL.q)}" oninput="SELL.q=this.value; sellRefreshList()">
+    <div id="sell-list" style="margin-top:8px;">${sellListHtml()}</div>
+    <div class="form-card" style="margin-top:12px;">
+      ${(feat('credit') && wl.creditEnabled) ? `<div class="form-row"><label>Forma de pago</label><select class="field" onchange="SELL.pay=this.value; sellRefreshFoot()"><option value="contado" ${SELL.pay!=='credito'?'selected':''}>Contado</option><option value="credito" ${SELL.pay==='credito'?'selected':''}>A cuenta (crédito)</option></select></div>` : ''}
+      <div class="form-row"><label>Notas (opcional)</label><textarea class="field" id="sell-notes" oninput="SELL.notes=this.value" placeholder="Ej: entregar el viernes">${escapeHtml(SELL.notes)}</textarea></div>
+      <div id="sell-foot">${sellFootHtml()}</div>
+    </div>
+    <button class="btn btn-outline btn-block" style="margin-top:10px;" onclick="navigate('#/vendedor')">← Cancelar</button></div>${renderFooter()}`;
+}
+function sellClientsHtml(){
+  const q = (SELL.cq||'').toLowerCase().trim();
+  let list = Object.values(MY_CUSTOMERS).sort((a,b)=>String(a.name).localeCompare(String(b.name)));
+  if(q) list = list.filter(c=>String(c.name||'').toLowerCase().includes(q) || String(c.phone||'').includes(q));
+  if(!list.length) return emptyState('👥','No hay clientes. Creá uno nuevo.');
+  return list.map(c=>{ const m = CMETA[c.id]||{}; const blocked = W().approval && !m.approved;
+    return `<div class="cart-item" style="cursor:pointer;" onclick="${blocked?`toast('Ese cliente todavía no está aprobado por el comercio.')`:`SELL.cid='${c.id}'; SELL.lines={}; render();`}"><div class="ci-info"><div class="ci-name">${escapeHtml(c.name)}${blocked?' <span class="tag">⏳ sin aprobar</span>':''}</div><div class="hint">${escapeHtml(c.phone||'')}</div></div></div>`; }).join('');
+}
+function sellRefreshClients(){ const b = document.getElementById('sell-clients'); if(b) b.innerHTML = sellClientsHtml(); }
+function sellRows(){
+  const q = (SELL.q||'').toLowerCase().trim(); const rows = [];
+  Object.values(PRODUCTS).filter(p=>p.status!=='pausado' && cartOn(p) && !isService(p)).sort((a,b)=>String(a.name).localeCompare(String(b.name))).forEach(p=>{
+    if(q && !String(p.name).toLowerCase().includes(q)) return;
+    const vs = (p.variants||[]).filter(v=>!(Number(v.maxFlavors)>0));
+    if((p.variants||[]).length && !vs.length) return;
+    if(vs.length) vs.forEach(v=>rows.push({p, vn:v.name})); else rows.push({p, vn:''});
+  });
+  return rows;
+}
+function sellLineQty(key){ const l = SELL.lines[key]; return l ? l.qty : 0; }
+function sellListHtml(){
+  const rows = sellRows();
+  if(!rows.length) return emptyState('📦','No hay productos para mostrar.');
+  const list = sellList();
+  return rows.slice(0,60).map(({p, vn})=>{
+    const key = lineKey(p.id, vn); const qty = sellLineQty(key); const out = p.status==='agotado' || wsMaxQty(p)<=0;
+    const price = priceFor(p, vn, Math.max(1,qty), list);
+    const info = [p.unit, wsMin(p)>1?'mín. '+wsMin(p):'', (W().trackStock?'stock '+wsMaxQty(p):'')].filter(Boolean).join(' · ');
+    const tiers = (p.tiers||[]).slice().sort((a,b)=>a.min-b.min).map(t=>t.min+'+ → '+money(priceFor(p,vn,t.min,list))).join(' · ');
+    return `<div class="cart-item" style="align-items:center;">
+      <div class="ci-info"><div class="ci-name">${escapeHtml(p.name)}${vn?` <span class="tag">${escapeHtml(vn)}</span>`:''}</div>
+        <div class="ci-price">${money(price)} c/u${info?' · '+escapeHtml(info):''}</div>${tiers?`<div class="hint" style="margin:0;">${tiers}</div>`:''}</div>
+      ${out ? '<span class="tag" style="background:var(--coral-tint); color:#8A2A1C;">Sin stock</span>' : `<div class="qty-stepper"><button type="button" onclick="sellQty('${p.id}','${escapeHtml(vn).replace(/'/g,"\\'")}',-1)">−</button><input type="number" min="0" value="${qty}" style="width:48px; text-align:center; border:0; background:transparent; font-weight:800;" onchange="sellSet('${p.id}','${escapeHtml(vn).replace(/'/g,"\\'")}',this.value)"><button type="button" onclick="sellQty('${p.id}','${escapeHtml(vn).replace(/'/g,"\\'")}',1)">+</button></div>`}
+    </div>`; }).join('') + (rows.length>60 ? `<p class="hint" style="text-align:center;">Mostrando 60 de ${rows.length}. Escribí en el buscador para encontrar otros.</p>` : '');
+}
+function sellRefreshList(){ const b = document.getElementById('sell-list'); if(b) b.innerHTML = sellListHtml(); sellRefreshFoot(); }
+function sellRefreshFoot(){ const b = document.getElementById('sell-foot'); if(b) b.innerHTML = sellFootHtml(); }
+function sellSet(pid, vn, v){
+  const p = PRODUCTS[pid]; if(!p) return; let q = Math.max(0, Math.floor(Number(v)||0));
+  const mx = wsMaxQty(p); if(q>mx){ q = mx; toast('Solo hay '+mx+' en stock.'); }
+  const key = lineKey(pid, vn);
+  if(q<=0) delete SELL.lines[key]; else SELL.lines[key] = {productId:pid, variantName:vn, qty:q};
+  sellRefreshList();
+}
+function sellQty(pid, vn, d){
+  const p = PRODUCTS[pid]; const cur = sellLineQty(lineKey(pid, vn));
+  let n = cur + d; if(d>0 && cur===0) n = wsMin(p); if(d<0 && cur<=wsMin(p)) n = 0;
+  sellSet(pid, vn, n);
+}
+function sellItems(){
+  const list = sellList();
+  return Object.values(SELL.lines).map(l=>{ const p = PRODUCTS[l.productId]; if(!p) return null;
+    return {productId:l.productId, name:p.name, variantName:l.variantName||'', price:priceFor(p, l.variantName, l.qty, list), qty:l.qty, minQty:wsMin(p), maxQty:wsMaxQty(p), available:true, note:''}; }).filter(Boolean);
+}
+function sellCheck(items){
+  const c = sellCust(); if(!c) return 'Elegí un cliente.';
+  if(!items.length) return 'Agregá al menos un producto.';
+  if(W().approval && !(CMETA[c.id]||{}).approved) return 'Ese cliente todavía no está aprobado.';
+  for(const it of items){ if(it.qty<it.minQty) return it.name+': el mínimo es '+it.minQty+'.'; if(it.qty>it.maxQty) return it.name+': solo hay '+it.maxQty+' en stock.'; }
+  const sub = items.reduce((a,i)=>a+i.price*i.qty,0); const mo = Number(W().minOrder)||0;
+  if(mo>0 && sub<mo) return 'Pedido mínimo '+money(mo)+'. Faltan '+money(mo-sub)+'.';
+  if(SELL.pay==='credito'){ const wl = c.wl||{}, lim = Number(wl.creditLimit)||0, bal = Number(wl.balance)||0; if(!wl.creditEnabled) return 'Ese cliente no tiene cuenta corriente.'; if(lim>0 && bal+sub>lim) return 'Supera el límite de crédito del cliente.'; }
+  return '';
+}
+function sellFootHtml(){
+  const items = sellItems(); const sub = items.reduce((a,i)=>a+i.price*i.qty,0); const err = items.length ? sellCheck(items) : '';
+  return `<div style="display:flex; justify-content:space-between; font-size:18px; font-weight:800;"><span>Total (${items.reduce((a,i)=>a+i.qty,0)} u.)</span><span style="color:var(--teal-dark,#0f6b63);">${money(sub)}</span></div>
+    ${err ? `<p class="hint" style="color:var(--coral); font-weight:700;">⚠️ ${escapeHtml(err)}</p>` : ''}
+    <button type="button" class="btn btn-mango btn-block" style="margin-top:10px;" onclick="sellSubmit(this)">✅ Enviar pedido</button>`;
+}
+async function sellSubmit(btn){
+  const c = sellCust(); const items = sellItems(); const err = sellCheck(items);
+  if(err){ toast(err); return; }
+  const subtotal = items.reduce((a,i)=>a+i.price*i.qty,0); const ln = sellList();
+  const id = secureId('ord');
+  const order = {id, customerName:c.name, customerPhone:c.phone||'', notes:(SELL.notes||'').trim(), deliveryTime:'', customerId:c.id, customerAddress:c.address||'', customerMapsUrl:customerMapsUrl(c),
+    items, subtotal, zoneName:'', zonePrice:0, couponCode:'', discount:0, total:subtotal, status:'nuevo', createdAt:Date.now(), updatedAt:Date.now(),
+    payMethod: SELL.pay==='credito'?'credito':'contado', listId:ln, listName:wsListName(ln), sellerId:AUTH_USER.uid, sellerName:AUTH_USER.displayName||AUTH_USER.email||'', byStaff:true};
+  order.items = items.map(it=>({productId:it.productId, name:it.name, variantName:it.variantName, price:it.price, qty:it.qty, available:true, note:''}));
+  if(btn){ btn.disabled = true; btn.textContent = 'Enviando...'; }
+  const ok = await withTimeout(dbMergeOrder(order), 10000);
+  if(ok==='__timeout__' || ok===false){ toast('No se pudo enviar el pedido. Probá de nuevo.'); if(btn){ btn.disabled=false; btn.textContent='✅ Enviar pedido'; } return; }
+  ORDERS = {...ORDERS, [id]: order}; SELL = null; window.__justOrdered = id;
+  navigate('#/pedido/'+id);
+}
+
+
+/* =========================================================================
+   CATÁLOGO RÁPIDO (v35)
+   - Cada producto es su propio registro (pimg_prod_<id>) con sus fotos (URLs) y una miniatura.
+   - Los visitantes guardan el catálogo en el teléfono y solo bajan lo que cambió.
+   - El catálogo se muestra por tandas; pedidos recientes primero; importar/exportar CSV.
+   ========================================================================= */
+const PK = 'pimg_prod_';
+let PRODUCTS_LEGACY = false;
+function prodClean(p){ const d = {...p}; delete d.imgDoc; d.images = (p.images||[]).filter(x=>x && x!==PLACEHOLDER_IMG); return d; }
+function prodRevive(d){ const p = {...d}; if(!p.images || !p.images.length) p.images = [PLACEHOLDER_IMG]; return p; }
+async function prodSave(p){
+  const d = prodClean(p); d.u = Date.now();
+  const ok = await dbSave(PK+p.id, d);
+  if(ok===false) return false;
+  p.images = d.images.length ? d.images : [PLACEHOLDER_IMG]; p.thumb = d.thumb; p.thumbFor = d.thumbFor;
+  return true;
+}
+async function prodDelete(id){
+  const ok = await dbSave(PK+id, {id, deleted:true, u:Date.now()});
+  if(ok===false) return false;
+  delete PRODUCTS[id]; return true;
+}
+function makeThumb(src){
+  return new Promise(res=>{
+    let done = false; const fin = v=>{ if(!done){ done = true; res(v); } };
+    setTimeout(()=>fin(''), 8000);
+    try{
+      const im = new Image(); im.crossOrigin = 'anonymous';
+      im.onload = ()=>{ try{
+        const m = 360; let w = im.width, h = im.height;
+        if(w>=h){ if(w>m){ h = h*m/w; w = m; } } else if(h>m){ w = w*m/h; h = m; }
+        const c = document.createElement('canvas'); c.width = Math.max(1,Math.round(w)); c.height = Math.max(1,Math.round(h));
+        c.getContext('2d').drawImage(im, 0, 0, c.width, c.height);
+        fin(c.toDataURL('image/jpeg', 0.62));
+      }catch(e){ fin(''); } };
+      im.onerror = ()=>fin('');
+      im.src = src;
+    }catch(e){ fin(''); }
+  });
+}
+async function loadProducts(){
+  PRODUCTS_LEGACY = false;
+  const CK = 'mt_pc2_' + STORE.id;
+  let cache = {since:'', items:{}};
+  try{ const c = JSON.parse(localStorage.getItem(CK)||'null'); if(c && c.items) cache = c; }catch(e){}
+  const since0 = cache.since || ''; let since = since0; const items = cache.items; let got = 0, failed = false;
+  try{
+    for(let from=0;; from+=1000){
+      let q = sb.from('store_docs').select('key,data,updated_at').eq('store_id', STORE.id).like('key', 'pimg\\_prod\\_%')
+        .order('updated_at', {ascending:true}).order('key', {ascending:true}).range(from, from+999);
+      if(since0) q = q.gte('updated_at', since0);
+      const {data, error} = await q; if(error) throw error;
+      (data||[]).forEach(r=>{
+        const d = r.data; if(!d || !d.id) return;
+        if(d.deleted) delete items[d.id]; else items[d.id] = d;
+        if(String(r.updated_at) > since) since = String(r.updated_at);
+        got++;
+      });
+      if(!data || data.length<1000) break;
+    }
+  }catch(e){ console.error(e); failed = true; }
+  if(!failed && !since0 && got===0){
+    // tienda anterior a la v35: todavía no tiene registros por producto
+    PRODUCTS = (await dbLoad('products')) || {};
+    try{
+      await Promise.all(Object.values(PRODUCTS).filter(p=>p && p.imgDoc).map(async p=>{
+        const imgs = await dbLoad('pimg_'+p.id);
+        p.images = (Array.isArray(imgs) && imgs.length) ? imgs : [PLACEHOLDER_IMG];
+      }));
+    }catch(e){ console.error(e); }
+    PRODUCTS_LEGACY = Object.keys(PRODUCTS).length>0;
+    return;
+  }
+  PRODUCTS = {}; Object.values(items).forEach(d=>{ PRODUCTS[d.id] = prodRevive(d); });
+  if(!failed){ try{ localStorage.setItem(CK, JSON.stringify({since, items})); }catch(e){} }
+}
+async function migrateProducts(){
+  if(!PRODUCTS_LEGACY || !adminSession) return;
+  const list = Object.values(PRODUCTS);
+  try{
+    for(let i=0; i<list.length; i+=50){
+      const rows = [];
+      for(const p of list.slice(i,i+50)){ const d = await uploadImagesIn({...prodClean(p), u:Date.now()}); rows.push({store_id:STORE.id, key:PK+p.id, data:d}); }
+      const {error} = await sb.from('store_docs').upsert(rows, {onConflict:'store_id,key'}); if(error) throw error;
+    }
+    await dbSave('products', {});
+    PRODUCTS_LEGACY = false; toast('Catálogo actualizado al sistema rápido.');
+  }catch(e){ console.error(e); }
+}
+
+/* ---------- catálogo por tandas ---------- */
+const CAT_STEP = 30;
+function catMoreBtn(total, shown){
+  return shown<total ? `<div id="cat-more" style="text-align:center; margin:16px 0;"><button type="button" class="btn btn-outline" onclick="catMore()">Ver más productos (${total-shown} restantes)</button></div>` : '<div id="cat-more"></div>';
+}
+function catMore(){
+  const items = window.__catItems || []; const prev = window.__catN || CAT_STEP; window.__catN = prev + CAT_STEP;
+  const g = document.getElementById('cat-grid'); if(g) g.insertAdjacentHTML('beforeend', items.slice(prev, window.__catN).map(productCard).join(''));
+  const m = document.getElementById('cat-more'); if(m) m.outerHTML = catMoreBtn(items.length, Math.min(items.length, window.__catN));
+}
+
+/* ---------- lista de productos del administrador ---------- */
+function admProdRowsHtml(){
+  const q = ((document.getElementById('adm-q')||{}).value||'').toLowerCase().trim();
+  let list = Object.values(PRODUCTS).sort((a,b)=>b.createdAt-a.createdAt);
+  if(q) list = list.filter(p=>String(p.name).toLowerCase().includes(q));
+  const n = window.__admN || 40; const shown = list.slice(0, n);
+  const rows = shown.map(p=>`
+          <tr>
+            <td>${escapeHtml(p.name)}</td><td>${money(p.price)}</td>
+            <td><span class="status-pill status-${p.status}">${p.status}</span></td>
+            <td class="hide-sm">${VIEWS[p.id]||0}</td>
+            <td><div class="admin-actions">
+              <button class="btn btn-outline btn-sm" onclick="navigate('#/admin/producto/${p.id}/editar')">Editar</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteProduct('${p.id}')">Eliminar</button>
+            </div></td>
+          </tr>`).join('');
+  const more = list.length>shown.length ? `<tr><td colspan="5" style="text-align:center;"><button type="button" class="btn btn-outline btn-sm" onclick="window.__admN=(window.__admN||40)+40; admProdRefresh();">Ver más (${list.length-shown.length} restantes)</button></td></tr>` : '';
+  return rows + more + (!list.length ? '<tr><td colspan="5" class="hint" style="text-align:center;">No hay productos con ese nombre.</td></tr>' : '');
+}
+function admProdRefresh(){ const b = document.getElementById('adm-prod-body'); if(b) b.innerHTML = admProdRowsHtml(); }
+
+/* ---------- pedidos recientes primero ---------- */
+const ORDERS_LIMIT = 200;
+let ORDERS_SINCE = '', ORDERS_MORE = false;
+async function loadAllOrders(btn){
+  if(btn) btn.disabled = true;
+  try{
+    const data = {};
+    for(let from=0;; from+=1000){
+      const {data:rows, error} = await sb.from('store_docs').select('key,data,updated_at').eq('store_id', STORE.id).like('key','order\\_%').order('updated_at',{ascending:true}).order('key',{ascending:true}).range(from, from+999);
+      if(error) throw error;
+      (rows||[]).forEach(r=>{ if(r.data && r.data.id){ data[r.data.id] = r.data; if(String(r.updated_at)>ORDERS_SINCE) ORDERS_SINCE = String(r.updated_at); } });
+      if(!rows || rows.length<1000) break;
+    }
+    ORDERS = data; ORDERS_MORE = false; render();
+  }catch(e){ console.error(e); toast('No se pudieron cargar los pedidos.'); }
+  finally{ if(btn) btn.disabled = false; }
+}
+
+/* ---------- importar / exportar productos (CSV de Excel) ---------- */
+let IMPORT = null;
+function normK(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,''); }
+function numOf(s){ return Math.round(Number(String(s==null?'':s).replace(/[^\d]/g,''))||0); }
+function parseCSV(text){
+  text = String(text||'').replace(/^﻿/,'');
+  const first = text.split(/\r?\n/)[0] || '';
+  const nS = first.split(';').length, nC = first.split(',').length, nT = first.split('\t').length;
+  const delim = (nS>=nC && nS>=nT && nS>1) ? ';' : (nT>nC ? '\t' : ',');
+  const rows = []; let row = [], cur = '', q = false;
+  for(let i=0;i<text.length;i++){
+    const ch = text[i];
+    if(q){ if(ch==='"'){ if(text[i+1]==='"'){ cur += '"'; i++; } else q = false; } else cur += ch; }
+    else if(ch==='"') q = true;
+    else if(ch===delim){ row.push(cur); cur = ''; }
+    else if(ch==='\n' || ch==='\r'){ if(ch==='\r' && text[i+1]==='\n') i++; row.push(cur); cur = ''; if(row.some(x=>x.trim()!=='')) rows.push(row); row = []; }
+    else cur += ch;
+  }
+  row.push(cur); if(row.some(x=>x.trim()!=='')) rows.push(row);
+  return rows;
+}
+const IMP_COLS = {name:['nombre','producto','name','articulo'], price:['precio','price','preciounitario'], stock:['stock','existencia','cantidad'], unit:['unidad','presentacion','unit'], min:['minimo','min','cantidadminima'], cat:['categoria','category','rubro'], desc:['descripcion','detalle','description'], tiers:['escalas','escala','preciosporcantidad','tiers'], status:['estado','status']};
+function csvEsc(v){ v = String(v==null?'':v); return /[;"\n\r]/.test(v) ? '"'+v.replace(/"/g,'""')+'"' : v; }
+function downloadText(name, text){
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob(['﻿'+text], {type:'text/csv;charset=utf-8'})); a.download = name; document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}
+function impTemplate(){
+  downloadText('plantilla_productos.csv', 'nombre;precio;stock;unidad;minimo;categoria;descripcion;escalas;estado\nGaseosa 1.5L;50000;120;Caja x12;2;alimentos;Gaseosa sabor cola;5:45000|10:40000;activo\nAgua mineral;30000;80;Pack x6;1;alimentos;;;activo\n');
+}
+function impExport(){
+  const head = 'nombre;precio;stock;unidad;minimo;categoria;descripcion;escalas;estado';
+  const lines = Object.values(PRODUCTS).sort((a,b)=>String(a.name).localeCompare(String(b.name))).map(p=>[p.name, p.price, p.stock, p.unit||'', p.minQty||1, p.category, p.description||'', (p.tiers||[]).map(t=>t.min+':'+t.price).join('|'), p.status].map(csvEsc).join(';'));
+  downloadText('mis_productos.csv', head+'\n'+lines.join('\n')+'\n');
+}
+function impFile(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  const r = new FileReader(); r.onload = ()=>{ const t = document.getElementById('imp-text'); if(t) t.value = String(r.result||''); impAnalyze(); }; r.readAsText(f, 'utf-8');
+}
+function impAnalyze(){
+  const out = document.getElementById('imp-out'); const rows = parseCSV((document.getElementById('imp-text')||{}).value||'');
+  if(rows.length<2){ out.innerHTML = '<p class="hint" style="color:var(--coral);">Pegá o elegí un archivo con una fila de títulos y al menos un producto.</p>'; IMPORT = null; return; }
+  const head = rows[0].map(normK); const col = {};
+  Object.keys(IMP_COLS).forEach(k=>{ const i = head.findIndex(h=>IMP_COLS[k].includes(h)); if(i>=0) col[k] = i; });
+  if(col.name==null || col.price==null){ out.innerHTML = '<p class="hint" style="color:var(--coral);">Faltan las columnas <b>nombre</b> y <b>precio</b> en la primera fila.</p>'; IMPORT = null; return; }
+  const byName = {}; Object.values(PRODUCTS).forEach(p=>{ byName[normK(p.name)] = p; });
+  const seen = new Set(); const list = []; const errors = [];
+  rows.slice(1).forEach((r, idx)=>{
+    const line = idx+2; const get = k=>col[k]==null ? undefined : String(r[col[k]]==null?'':r[col[k]]).trim();
+    const name = get('name'); if(!name){ errors.push('Fila '+line+': sin nombre'); return; }
+    const price = numOf(get('price')); if(price<=0){ errors.push('Fila '+line+' ('+name+'): precio inválido'); return; }
+    const key = normK(name); if(seen.has(key)){ errors.push('Fila '+line+' ('+name+'): repetido en el archivo'); return; } seen.add(key);
+    const f = {name, price};
+    if(col.stock!=null) f.stock = numOf(get('stock'));
+    if(col.unit!=null) f.unit = get('unit');
+    if(col.min!=null) f.minQty = Math.max(1, numOf(get('min')));
+    if(col.desc!=null) f.description = get('desc');
+    if(col.cat!=null){ const c = normK(get('cat')); const hit = CATEGORIES.find(x=>x.slug===c || normK(x.name)===c); f.category = hit ? hit.slug : 'otros'; }
+    if(col.tiers!=null) f.tiers = String(get('tiers')||'').split(/[|]/).map(s=>s.split(':')).map(a=>({min:numOf(a[0]), price:numOf(a[1])})).filter(t=>t.min>1 && t.price>0).sort((a,b)=>a.min-b.min);
+    if(col.status!=null){ const s = normK(get('status')); f.status = s.startsWith('paus') ? 'pausado' : (s.startsWith('ago') ? 'agotado' : 'activo'); }
+    list.push({f, existing: byName[key] || null});
+  });
+  const nNew = list.filter(x=>!x.existing).length, nUpd = list.length - nNew;
+  const room = productsAllowed() - Object.keys(PRODUCTS).length;
+  const over = nNew > room;
+  IMPORT = (over || !list.length) ? null : list;
+  out.innerHTML = `<div class="form-card" style="margin-top:12px;"><b>${nNew}</b> producto${nNew===1?'':'s'} nuevo${nNew===1?'':'s'} · <b>${nUpd}</b> a actualizar (precio y stock; conservan sus fotos)
+    ${errors.length ? `<p class="hint" style="color:var(--coral);">⚠️ ${errors.length} fila(s) con problemas, se saltean:<br>${errors.slice(0,8).map(escapeHtml).join('<br>')}${errors.length>8?'<br>…':''}</p>` : ''}
+    ${over ? `<p class="hint" style="color:var(--coral); font-weight:700;">Tu plan permite ${productsAllowed()} productos y tenés ${Object.keys(PRODUCTS).length}: no entran ${nNew-room} más. <a href="#/admin/plan">Ver planes</a></p>` : ''}
+    ${IMPORT ? `<button type="button" class="btn btn-mango btn-block" style="margin-top:10px;" onclick="impApply(this)">✅ Importar ahora</button>` : ''}</div>`;
+}
+async function impApply(btn){
+  if(!IMPORT || !IMPORT.length) return;
+  if(btn){ btn.disabled = true; btn.textContent = 'Importando...'; }
+  const track = !!(wsOn() && W().trackStock);
+  const docs = IMPORT.map(({f, existing})=>{
+    const p = existing ? {...existing} : {id:uid('p'), kind:'producto', cartEnabled:true, gallery:'classic', collageLayout:'mosaic', fx:'fade', secs:3, waPhone:'', oldPrice:null, description:'', category:'otros', stock:0, status:'activo', images:[PLACEHOLDER_IMG], variants:[], unit:'', minQty:1, tiers:[], createdAt:Date.now()};
+    Object.assign(p, f);
+    if(f.stock!==undefined && f.status===undefined && track){ p.status = f.stock>0 ? (p.status==='agotado' ? 'activo' : p.status) : 'agotado'; }
+    return p;
+  });
+  try{
+    for(let i=0;i<docs.length;i+=100){
+      const rows = docs.slice(i,i+100).map(p=>({store_id:STORE.id, key:PK+p.id, data:{...prodClean(p), u:Date.now()}}));
+      const {error} = await sb.from('store_docs').upsert(rows, {onConflict:'store_id,key'}); if(error) throw error;
+      if(btn) btn.textContent = 'Importando... '+Math.min(docs.length,i+100)+' de '+docs.length;
+    }
+    docs.forEach(p=>{ PRODUCTS[p.id] = p; });
+    toast('Importados: '+docs.length+' productos.'); IMPORT = null; navigate('#/admin');
+  }catch(e){ console.error(e); toast('No se pudo importar: '+(e && e.message ? e.message : 'error')); if(btn){ btn.disabled = false; btn.textContent = '✅ Importar ahora'; } }
+}
+function viewAdminImportar(){
+  if(!gateAdmin()) return '';
+  IMPORT = null;
+  return `${renderHeader()}<div class="container section">
+    <div class="section-head"><h2>📥 Importar productos</h2></div>
+    <div class="form-card">
+      <p class="hint">Cargá muchos productos de una vez desde Excel. Guardá la planilla como <b>CSV</b> (Archivo → Guardar como → CSV) y elegila acá.</p>
+      <p class="hint"><b>Columnas:</b> nombre · precio · stock · unidad · minimo · categoria · descripcion · escalas (ej: <code>5:45000|10:40000</code>) · estado. Solo <b>nombre</b> y <b>precio</b> son obligatorias.</p>
+      <p class="hint">Si un producto ya existe (mismo nombre) se <b>actualizan sus datos</b> y se conservan las fotos. Así podés actualizar precios y stock de todo el catálogo en un paso. Las fotos se agregan después, producto por producto.</p>
+      <div style="display:flex; gap:8px; flex-wrap:wrap; margin:10px 0;">
+        <button type="button" class="btn btn-outline btn-sm" onclick="impTemplate()">⬇️ Plantilla de ejemplo</button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="impExport()">⬇️ Exportar mis productos</button>
+      </div>
+      <input class="field" type="file" accept=".csv,.txt,text/csv,text/plain" onchange="impFile(this)">
+      <p class="hint" style="margin:8px 0 4px;">o pegá el contenido acá:</p>
+      <textarea class="field" id="imp-text" rows="5" placeholder="nombre;precio;stock&#10;Gaseosa;50000;100"></textarea>
+      <button type="button" class="btn btn-outline btn-block" style="margin-top:8px;" onclick="impAnalyze()">🔍 Revisar</button>
+      <div id="imp-out"></div>
+      <button type="button" class="btn btn-outline btn-block" style="margin-top:10px;" onclick="navigate('#/admin')">← Volver al panel</button>
+    </div></div>${renderFooter()}`;
+}
+
+
+/* =========================================================================
    PLATAFORMA MULTI-TIENDA (Supabase)
    - Cada tienda se abre con  ?t=nombre-del-link
    - Sin ese parámetro se muestra la página de la plataforma (crear tienda,
      mis tiendas y el panel del administrador general).
    ========================================================================= */
-const APP_VERSION = 'v33'; const APP_VERSION_FULL = 'v33 · 23/10/2026 20:52';
+const APP_VERSION = 'v35'; const APP_VERSION_FULL = 'v35 · 30/10/2026 15:29';
 function appVerHtml(){ return `<div style="opacity:.55; font-size:11px; margin-top:4px;">Versión ${APP_VERSION_FULL}</div>`; }
 const FEATURE_DEFS = [
   ['banner','📢 Banner de publicidad'],['welcome','👋 Pantalla de bienvenida'],
   ['gallery_collage','🧩 Galerías collage y deslizable'],['gallery_slideshow','🎞️ Galería con presentación automática'],
   ['services','📣 Servicios / publicidad'],['coupons','🏷️ Cupones de descuento'],['delivery_zones','🚚 Zonas de entrega'],
   ['flavors','🍨 Sabores y opciones'],['login_optional','👤 Registro de clientes (opcional)'],['login_required','🔒 Registro obligatorio'],
-  ['export_orders','⬇️ Exportar pedidos'],['remove_badge','✨ Sin marca de la plataforma'],['custom_domain','🌐 Dominio propio'],['priority_support','💬 Soporte prioritario']
+  ['export_orders','⬇️ Exportar pedidos'],['remove_badge','✨ Sin marca de la plataforma'],['custom_domain','🌐 Dominio propio'],['priority_support','💬 Soporte prioritario'],
+  ['wholesale','🏭 Modo mayorista (escalas, mínimos, listas, stock)'],['sellers','🧑‍💼 Vendedores'],['credit','💳 Cuenta corriente']
 ];
 const LIMIT_DEFS = [
   ['max_products','📦 Productos','-1 = ilimitado'],['max_photos','🖼️ Fotos por producto','máximo 8'],
-  ['max_banners','📢 Fotos en el banner','-1 = ilimitado'],['extra_admins','👥 Administradores extra','0 = solo el dueño']
+  ['max_banners','📢 Fotos en el banner','-1 = ilimitado'],['extra_admins','👥 Administradores extra','0 = solo el dueño'],['max_sellers','🧑‍💼 Vendedores','0 = ninguno, -1 = ilimitado']
 ];
 let STORE = null, PLAN = null, PLAN_FREE = null, STORE_STATE = 'none';
 let PLATFORM = {name:'Catálogo de ventas', tagline:'Creá tu catálogo online y vendé por WhatsApp', contact_whatsapp:'', grace_days:3, terms:''};
 let PUBLIC_PLANS = [];
-let ROLE = {platform:false, member:false};
+let ROLE = {platform:false, member:false, seller:false};
 
 function getSlug(){
   try{ const t = (new URLSearchParams(location.search).get('t')||'').toLowerCase().trim(); return /^[a-z0-9][a-z0-9-]{2,29}$/.test(t) ? t : ''; }catch(e){ return ''; }
@@ -2808,9 +3753,11 @@ async function handlePending(){
   try{ sessionStorage.removeItem('mt_pending'); }catch(e){}
   if(p.kind==='admin'){
     if(adminSession){ toast('Acceso concedido.'); navigate('#/admin'); }
+    else if(sellerSession){ toast('Acceso de vendedor.'); navigate('#/vendedor'); }
     else { toast('Esa cuenta de Google no administra esta tienda.'); navigate('#/'); }
   }else if(p.kind==='customer'){
     if(adminSession){ toast('Entraste como administrador.'); navigate('#/admin'); return; }
+    if(sellerSession){ toast('Entraste como vendedor.'); navigate('#/vendedor'); return; }
     const c = getCustomer();
     if(c && c.id){ toast('¡Hola ' + String(c.name||'').split(' ')[0] + '!'); navigate(p.back || '#/'); }
     else { window.__afterReg = p.back || null; navigate('#/registro'); }
@@ -3302,6 +4249,11 @@ function render(){
   else if(parts[0]==='admin' && parts[1]==='sabores'){ html = viewAdminSabores(); }
   else if(parts[0]==='admin' && parts[1]==='clientes'){ html = viewAdminClientes(); }
   else if(parts[0]==='admin' && parts[1]==='saludo'){ html = viewAdminSaludo(); }
+  else if(parts[0]==='vendedor'){ html = viewVendedor(parts[1]); }
+  else if(parts[0]==='admin' && parts[1]==='importar'){ html = viewAdminImportar(); }
+  else if(parts[0]==='admin' && parts[1]==='mayorista'){ html = viewAdminMayorista(); }
+  else if(parts[0]==='admin' && parts[1]==='vendedores'){ html = viewAdminVendedores(); }
+  else if(parts[0]==='admin' && parts[1]==='cuentas'){ html = viewAdminCuentas(); }
   else if(parts[0]==='admin' && parts[1]==='plan'){ html = viewAdminPlan(); }
   else if(parts[0]==='terminos' || parts[0]==='privacidad'){ html = viewLegal(parts[0]); }
   else { html = viewCatalogo(query); }
@@ -3312,6 +4264,8 @@ function render(){
   if(parts[0]==='admin' && parts[1]==='sabores' && flavorsForm){ flvRender(); }
   if(parts[0]==='admin' && parts[1]==='clientes' && adminSession){ loadCustomersAdmin(); }
   if(parts[0]==='admin' && parts[1]==='saludo'){ wlRefreshImg(); }
+  if(parts[0]==='admin' && parts[1]==='vendedores' && adminSession && wsOn()){ wsLoadSellers(); }
+  if(parts[0]==='admin' && parts[1]==='cuentas' && adminSession && wsOn()){ wsLoadCuentas(); }
   if(parts[0]==='producto' && parts[1] && PRODUCTS[parts[1]]){ const pp = PRODUCTS[parts[1]]; if(pp.gallery==='show') setupPgs(pp.fx||'fade', pp.secs||3); }
   maybeShowWelcome();
   if(parts[0]==='admin' && parts[1]==='banners' && bnForm){ bnRefreshAll(); }
@@ -3332,9 +4286,31 @@ async function resumeAfterOAuth(){
     return true;
   }catch(e){ console.error(e); return false; }
 }
+async function authReturnCheck(){
+  document.getElementById('app').innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:'Baloo 2';font-size:20px;color:#0E7C7B;text-align:center;padding:20px;">🔐 Entrando con Google...</div>`;
+  let s = null, why = '';
+  try{
+    const r = await Promise.race([sb.auth.getSession(), new Promise(res=>setTimeout(()=>res('__t__'), 12000))]);
+    if(r==='__t__') why = 'tardó demasiado';
+    else if(r && r.error) why = r.error.message || '';
+    else s = r && r.data ? r.data.session : null;
+  }catch(e){ why = (e && e.message) || 'error'; }
+  if(s) return true;
+  let slug = ''; try{ const p = JSON.parse(sessionStorage.getItem('mt_pending')||'null'); slug = (p && p.slug) || ''; }catch(e){}
+  const A = window.AUTH_RET || {};
+  const detail = ['Motivo: '+(A.err||why||'no se pudo iniciar la sesión'), 'Dato de seguridad del navegador: '+(A.verifier===null?'?':(A.verifier?'sí':'NO')), 'App instalada: '+(A.standalone?'sí':'no'), 'Navegador: '+(A.ua||'').slice(0,120)].join('\n');
+  document.getElementById('app').innerHTML = `<div style="max-width:440px;margin:40px auto;padding:20px;font-family:sans-serif;text-align:center;">
+    <div style="font-size:42px;">⚠️</div><h2 style="margin:8px 0;">No se pudo completar el ingreso</h2>
+    <p style="color:#555;font-size:14px;line-height:1.5;">Google te reconoció pero el navegador no pudo terminar el ingreso. Suele pasar si abriste el link <b>dentro de otra app</b> (WhatsApp, Facebook, Instagram) o desde la app instalada.</p>
+    <p style="color:#555;font-size:14px;line-height:1.5;"><b>Probá así:</b> copiá el link y abrilo en <b>Chrome o Safari</b>, y tocá de nuevo "Entrar con Google".</p>
+    <button onclick="try{sessionStorage.removeItem('mt_pending')}catch(e){}; location.replace(location.origin+location.pathname+'${slug?'?t='+slug:''}')" style="margin:8px;padding:12px 20px;border:0;border-radius:12px;background:#F5A02A;font-weight:700;font-size:15px;">Reintentar</button>
+    <details style="margin-top:14px;text-align:left;font-size:12px;color:#666;"><summary>Detalle técnico (mandáselo al soporte)</summary><pre style="white-space:pre-wrap;">${escapeHtml(detail)}</pre></details></div>`;
+  return false;
+}
 async function boot(){
   document.getElementById('app').innerHTML = `<div style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:'Baloo 2';font-size:20px;color:#0E7C7B;">🛍️ Cargando...</div>`;
   if(!sb){ document.getElementById('app').innerHTML = '<p style="padding:30px;">No se pudo cargar la conexión. Revisá tu internet y recargá.</p>'; return; }
+  if(window.AUTH_RET && (AUTH_RET.code || AUTH_RET.err)){ if(!(await authReturnCheck())) return; }
   if(await resumeAfterOAuth()) return;
   await loadPlatform();
   const slug = getSlug();
